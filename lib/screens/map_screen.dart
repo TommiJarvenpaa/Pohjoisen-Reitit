@@ -6,6 +6,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme/app_colors.dart';
 import '../models/app_models.dart';
@@ -348,50 +349,39 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  void _shareRoute(RouteOption option) {
+  Future<void> _shareRoute(RouteOption option) async {
+    // 1. Luetaan määränpää ensin Riverpodin tilasta (jos haku juuri tehty)
+    final dest = ref.read(destinationLocationProvider);
+    String destName = dest?.name ?? '';
+
+    // 2. Jos tila on tyhjä (esim. sovellus juuri avattu ja reitti tuli välimuistista),
+    // haetaan viimeisin tallennettu kohde suoraan laitteen muistista.
+    if (destName.isEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      destName = prefs.getString('last_dest_name') ?? 'Määränpää';
+    }
+
     final buf = StringBuffer();
+
     final totalMinutes = option.arrivalTime
         .difference(option.leaveHomeTime)
         .inMinutes;
 
-    buf.writeln('🚌 Pohjoisen Reitit (Matka-aika: $totalMinutes min)');
-    buf.writeln('-----------------------------');
+    buf.writeln('🚌 Pohjoisen Reitit');
+    buf.writeln('⏱ Matka-aika $totalMinutes min');
+    buf.writeln('');
 
-    // 1. Lähdön ja ensimmäisen kävelyn näyttäminen
-    double firstWalk = option.walkDistances.isNotEmpty
-        ? option.walkDistances[0]
-        : 0.0;
-    buf.write('🚶 Lähde klo ${_formatTime(option.leaveHomeTime)}');
-    if (firstWalk > 0) {
-      buf.write(' (Kävele ${firstWalk.round()} m)');
-    }
-    buf.writeln('\n');
-
-    // 2. Loopataan bussimatkat ja niiden jälkeiset kävelyt
     for (int i = 0; i < option.busLegs.length; i++) {
       final leg = option.busLegs[i];
 
-      // Bussiosuus
       buf.writeln('🚌 Linja ${leg.busNumber}');
-      buf.writeln('${_formatTime(leg.departureTime)} | ${leg.fromStop}');
-      buf.writeln('${_formatTime(leg.arrivalTime)} | ${leg.toStop}');
-      buf.writeln(''); // Tyhjä rivi väliin luettavuuden vuoksi
-
-      // Seuraava kävely (vaihto tai loppukävely kohteeseen)
-      if (i + 1 < option.walkDistances.length) {
-        double nextWalk = option.walkDistances[i + 1];
-        if (nextWalk > 0) {
-          if (i == option.busLegs.length - 1) {
-            buf.writeln('🚶 Kävele kohteeseen ${nextWalk.round()} m\n');
-          } else {
-            buf.writeln('🚶 Vaihto: Kävele ${nextWalk.round()} m\n');
-          }
-        }
-      }
+      buf.writeln('${_formatTime(leg.departureTime)} ${leg.fromStop}');
+      buf.writeln('${_formatTime(leg.arrivalTime)} ${leg.toStop}');
+      buf.writeln('');
     }
 
-    // 3. Saapumisaika
-    buf.writeln('🏁 Perillä klo ${_formatTime(option.arrivalTime)}');
+    // Tulostetaan oikea kohde loppuun
+    buf.writeln('🏁 Perillä ${_formatTime(option.arrivalTime)} ($destName)');
 
     Clipboard.setData(ClipboardData(text: buf.toString()));
     _showSnack('Reittitiedot kopioitu leikepöydälle!');
