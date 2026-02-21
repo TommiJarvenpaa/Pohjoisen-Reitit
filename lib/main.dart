@@ -22,7 +22,7 @@ const Color kBus = Color(
 ); // Logon kirkkaampi sininen (bussin lasit/reitti)
 const Color kBusLight = Color(0xFFE1F5FE); // Hyvin haalea sininen taustoille
 const Color kWalk = Color(
-  0xFF4CAF50,
+  0xFF8E24AA,
 ); // Logon revontulien/maaston vihreä kävelyreiteille
 const Color kOnTime = Color(0xFF4CAF50); // Vihreä ajallaan oleville
 const Color kDelayed = Color(
@@ -1481,10 +1481,15 @@ class _MapScreenState extends State<MapScreen> {
     if (query.isEmpty) return _recentSearches; // Näytä historia jos tyhjä
 
     try {
+      // PÄIVITETTY ALUE:
+      // min_lat: 64.7 (Etelä: Liminka/Lumijoki)
+      // max_lat: 65.45 (Pohjoinen: Ii/Yli-Ii)
+      // min_lon: 24.9 (Länsi: Hailuoto/meri)
+      // max_lon: 26.5 (Itä: Ylikiiminki)
       final response = await http.get(
         Uri.parse(
-          'https://api.digitransit.fi/geocoding/v1/autocomplete?text=$query&boundary.rect.min_lat=64.8&boundary.rect.max_lat=65.2&boundary.rect.min_lon=25.2&boundary.rect.max_lon=25.9',
-        ), // Oulun alue
+          'https://api.digitransit.fi/geocoding/v1/autocomplete?text=$query&boundary.rect.min_lat=64.7&boundary.rect.max_lat=65.45&boundary.rect.min_lon=24.9&boundary.rect.max_lon=26.5',
+        ),
         headers: {'digitransit-subscription-key': _digitransitKey},
       );
       if (response.statusCode == 200) {
