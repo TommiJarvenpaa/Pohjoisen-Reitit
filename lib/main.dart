@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
@@ -9,32 +10,24 @@ import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart'; // <-- Lisätty dotenv
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
-const Color kPrimary = Color(
-  0xFF003366,
-); // Logon yötaivaan syvä sininen (App bar jne.)
-const Color kPrimaryDark = Color(0xFF001A33); // Vielä tummempi sininen
-const Color kAccent = Color(0xFFFFD54F); // Logon tähden keltainen korostusväri
-const Color kBus = Color(
-  0xFF0077C8,
-); // Logon kirkkaampi sininen (bussin lasit/reitti)
-const Color kBusLight = Color(0xFFE1F5FE); // Hyvin haalea sininen taustoille
-const Color kWalk = Color(
-  0xFF8E24AA,
-); // Logon revontulien/maaston vihreä kävelyreiteille
-const Color kOnTime = Color(0xFF4CAF50); // Vihreä ajallaan oleville
-const Color kDelayed = Color(
-  0xFFE53935,
-); // Punainen myöhässä oleville (pysyy punaisena huomion takia)
-const Color kSurface = Color(0xFFF5F6FA); // Vaalea tausta
-const Color kStop = Color(0xFF003366); // Pysäkkimerkit tummalla sinisellä
-const Color kLiveBus = Color(
-  0xFFFFD54F,
-); // Live-bussit keltaisella, jotta erottuvat kartasta!
+const Color kPrimary = Color(0xFF003366);
+const Color kPrimaryDark = Color(0xFF001A33);
+const Color kAccent = Color(0xFFFFD54F);
+const Color kBus = Color(0xFF0077C8);
+const Color kBusLight = Color(0xFFE1F5FE);
+const Color kWalk = Color(0xFF8E24AA);
+const Color kOnTime = Color(0xFF4CAF50);
+const Color kDelayed = Color(0xFFE53935);
+const Color kSurface = Color(0xFFF5F6FA);
+const Color kStop = Color(0xFF003366);
+const Color kLiveBus = Color(0xFFFFD54F);
+const Color kAlert = Color(0xFFF57C00);
 
-// <-- MUUTETTU main-funktio asynkroniseksi ja lisätty dotenv.load()
+// ─── Main ─────────────────────────────────────────────────────────────────────
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: ".env");
@@ -51,7 +44,6 @@ class PohjoisenReitit extends StatelessWidget {
       title: 'Pohjoisen Reitit',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // Käytetään väripalettia
         colorScheme: ColorScheme.fromSeed(
           seedColor: kPrimary,
           primary: kPrimary,
@@ -65,11 +57,8 @@ class PohjoisenReitit extends StatelessWidget {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      supportedLocales: const [
-        Locale('fi', 'FI'), // Suomi
-        Locale('en', 'US'), // Varalla englanti
-      ],
-      locale: const Locale('fi', 'FI'), // Pakota sovellus suomeksi
+      supportedLocales: const [Locale('fi', 'FI'), Locale('en', 'US')],
+      locale: const Locale('fi', 'FI'),
       home: const MapScreen(),
     );
   }
@@ -178,6 +167,31 @@ class _ShimmerCard extends StatelessWidget {
           SizedBox(height: 8),
           _ShimmerBox(width: 220, height: 14),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Stop board shimmer ───────────────────────────────────────────────────────
+class _StopBoardShimmer extends StatelessWidget {
+  const _StopBoardShimmer();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      itemCount: 6,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemBuilder: (_, _) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Row(
+          children: const [
+            _ShimmerBox(width: 48, height: 28, radius: 14),
+            SizedBox(width: 12),
+            Expanded(child: _ShimmerBox(width: double.infinity, height: 16)),
+            SizedBox(width: 12),
+            _ShimmerBox(width: 48, height: 22, radius: 6),
+          ],
+        ),
       ),
     );
   }
@@ -303,7 +317,7 @@ class _StopDot extends StatelessWidget {
       message: name,
       child: Container(
         width: 14,
-        height: 14, // Made slightly larger to be easier to tap
+        height: 14,
         decoration: BoxDecoration(
           color: Colors.white,
           shape: BoxShape.circle,
@@ -367,7 +381,7 @@ class _LiveBusMarker extends StatelessWidget {
           child: Text(
             busNumber,
             style: const TextStyle(
-              color: kPrimaryDark, // <--- MUUTETTU VALKOISESTA TUMMAKSI
+              color: kPrimaryDark,
               fontWeight: FontWeight.bold,
               fontSize: 10,
             ),
@@ -390,7 +404,7 @@ class _LiveBusMarker extends StatelessWidget {
           ),
           child: const Icon(
             Icons.directions_bus,
-            color: kPrimaryDark, // <--- MUUTETTU VALKOISESTA TUMMAKSI
+            color: kPrimaryDark,
             size: 18,
           ),
         ),
@@ -434,14 +448,22 @@ class _BusNumberBadge extends StatelessWidget {
 class _RouteCard extends StatelessWidget {
   final RouteOption option;
   final bool isSelected;
+  final bool isFavorite;
+  final bool isOfflineData;
   final String Function(DateTime) formatTime;
   final VoidCallback onTap;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback onShare;
 
   const _RouteCard({
     required this.option,
     required this.isSelected,
+    required this.isFavorite,
+    required this.isOfflineData,
     required this.formatTime,
     required this.onTap,
+    required this.onToggleFavorite,
+    required this.onShare,
   });
 
   @override
@@ -451,12 +473,12 @@ class _RouteCard extends StatelessWidget {
         .difference(option.leaveHomeTime)
         .inMinutes;
 
-    // Rakennetaan aikajana ohjelmallisesti (imperatiivisesti) erilliseen listaan,
-    // jotta currentWalkIndex:n kasvattaminen ei aiheuta tyyppivirhettä UI-rakenteessa.
+    // Collect all alerts across all bus legs
+    final allAlerts = option.busLegs.expand((leg) => leg.alerts).toList();
+
     int currentWalkIndex = 0;
     List<Widget> timelineWidgets = [];
 
-    // Lähtö
     timelineWidgets.add(
       _TimelineRow(
         icon: Icons.directions_walk,
@@ -466,7 +488,6 @@ class _RouteCard extends StatelessWidget {
       ),
     );
 
-    // Bussiosuudet ja niiden väliset kävelyt
     for (int i = 0; i < option.busLegs.length; i++) {
       timelineWidgets.add(_TimelineDivider());
 
@@ -489,7 +510,6 @@ class _RouteCard extends StatelessWidget {
       );
     }
 
-    // Viimeinen mahdollinen kävelyosuus
     if (currentWalkIndex < option.walkDistances.length &&
         option.walkDistances[currentWalkIndex] > 0) {
       timelineWidgets.add(_TimelineDivider());
@@ -531,6 +551,33 @@ class _RouteCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Offline badge
+              if (isOfflineData)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Colors.orange.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.wifi_off, size: 12, color: Colors.orange),
+                      SizedBox(width: 4),
+                      Text(
+                        'Tallennettu reitti – ei reaaliaikainen',
+                        style: TextStyle(fontSize: 10, color: Colors.orange),
+                      ),
+                    ],
+                  ),
+                ),
               Row(
                 children: [
                   if (isWalkOnly)
@@ -571,13 +618,37 @@ class _RouteCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  const SizedBox(width: 4),
+                  // Share button
+                  GestureDetector(
+                    onTap: onShare,
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.share,
+                        size: 18,
+                        color: Colors.grey[400],
+                      ),
+                    ),
+                  ),
+                  // Favorite button
+                  GestureDetector(
+                    onTap: onToggleFavorite,
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      child: Icon(
+                        isFavorite
+                            ? Icons.star_rounded
+                            : Icons.star_border_rounded,
+                        size: 20,
+                        color: isFavorite ? kAccent : Colors.grey[400],
+                      ),
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 14),
-
-              // Puramme luodun listan suoraan Columnin children-rakenteeseen
               ...timelineWidgets,
-
               const SizedBox(height: 8),
               const Divider(height: 1, color: Color(0xFFEEEEEE)),
               const SizedBox(height: 10),
@@ -595,6 +666,51 @@ class _RouteCard extends StatelessWidget {
                   ),
                 ],
               ),
+              // Alerts section
+              if (allAlerts.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: kAlert.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: kAlert.withValues(alpha: 0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            color: kAlert,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Häiriötiedote${allAlerts.length > 1 ? 't' : ''}',
+                            style: const TextStyle(
+                              color: kAlert,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                      for (final alert in allAlerts) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          alert.text,
+                          style: TextStyle(
+                            color: Colors.grey[800],
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -892,6 +1008,259 @@ class _BusLegSectionState extends State<_BusLegSection> {
   }
 }
 
+// ─── Stop board sheet (StatefulWidget – opens immediately with shimmer) ────────
+class _StopBoardSheet extends StatefulWidget {
+  final String stopId;
+  final String stopName;
+  final String digitransitKey;
+  final String Function(DateTime) formatTime;
+  final ScrollController scrollController;
+  final VoidCallback? onSetAsStart;
+  final VoidCallback? onSetAsDestination;
+
+  const _StopBoardSheet({
+    required this.stopId,
+    required this.stopName,
+    required this.digitransitKey,
+    required this.formatTime,
+    required this.scrollController,
+    this.onSetAsStart,
+    this.onSetAsDestination,
+  });
+
+  @override
+  State<_StopBoardSheet> createState() => _StopBoardSheetState();
+}
+
+class _StopBoardSheetState extends State<_StopBoardSheet> {
+  bool _isLoading = true;
+  List<StopTimeData> _departures = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchData();
+  }
+
+  Future<void> _fetchData() async {
+    final startTimeSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final String query =
+        """
+        {
+          stop(id: "${widget.stopId}") {
+            stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 20) {
+              scheduledDeparture realtimeDeparture realtimeState realtime serviceDay headsign
+              trip { route { shortName } }
+            }
+          }
+        }
+        """;
+
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.digitransit.fi/routing/v2/waltti/gtfs/v1'),
+        headers: {
+          'Content-Type': 'application/json',
+          'digitransit-subscription-key': widget.digitransitKey,
+        },
+        body: json.encode({'query': query}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final stoptimes =
+            data['data']?['stop']?['stoptimesWithoutPatterns']
+                as List<dynamic>?;
+
+        if (stoptimes != null && mounted) {
+          List<StopTimeData> departures = [];
+          for (var st in stoptimes) {
+            String? rName = st['trip']?['route']?['shortName'];
+            int? schedDep = st['scheduledDeparture'];
+            int? realDep = st['realtimeDeparture'];
+            int? serviceDay = st['serviceDay'];
+            String rtState = st['realtimeState'] ?? 'SCHEDULED';
+            bool isRt = st['realtime'] ?? false;
+            String headsign = st['headsign'] ?? '';
+
+            if (rName != null && schedDep != null && serviceDay != null) {
+              departures.add(
+                StopTimeData(
+                  scheduledEpochSec: serviceDay + schedDep,
+                  realtimeEpochSec: serviceDay + (realDep ?? schedDep),
+                  realtimeState: rtState,
+                  isRealtime: isRt,
+                  busNumber: rName,
+                  headsign: headsign,
+                ),
+              );
+            }
+          }
+          setState(() => _departures = departures);
+        }
+      }
+    } catch (e) {
+      debugPrint('Stop board fetch error: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              margin: const EdgeInsets.only(top: 12, bottom: 4),
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 12, 0),
+            child: Row(
+              children: [
+                const Icon(Icons.transfer_within_a_station, color: kStop),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    widget.stopName,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: kStop,
+                    ),
+                  ),
+                ),
+                // Set as start / destination buttons
+                if (widget.onSetAsStart != null)
+                  IconButton(
+                    icon: const Icon(Icons.trip_origin, color: kWalk),
+                    tooltip: 'Aseta lähtöpisteeksi',
+                    onPressed: widget.onSetAsStart,
+                  ),
+                if (widget.onSetAsDestination != null)
+                  IconButton(
+                    icon: const Icon(Icons.location_on, color: kPrimary),
+                    tooltip: 'Aseta määränpääksi',
+                    onPressed: widget.onSetAsDestination,
+                  ),
+              ],
+            ),
+          ),
+          const Divider(),
+          Expanded(
+            child: _isLoading
+                ? const _StopBoardShimmer()
+                : _departures.isEmpty
+                ? const Center(child: Text('Ei tulevia lähtöjä lähiaikoina.'))
+                : ListView.builder(
+                    controller: widget.scrollController,
+                    itemCount: _departures.length,
+                    itemBuilder: (context, index) {
+                      final dep = _departures[index];
+                      final depTime = DateTime.fromMillisecondsSinceEpoch(
+                        dep.realtimeEpochSec * 1000,
+                      );
+                      final bool isDelayed =
+                          dep.isRealtime &&
+                          dep.realtimeEpochSec > dep.scheduledEpochSec;
+
+                      return ListTile(
+                        leading: _BusNumberBadge(dep.busNumber ?? ''),
+                        title: Text(dep.headsign ?? 'Päätepysäkki puuttuu'),
+                        trailing: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              widget.formatTime(depTime),
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: isDelayed
+                                    ? kDelayed
+                                    : (dep.isRealtime
+                                          ? kOnTime
+                                          : Colors.black87),
+                              ),
+                            ),
+                            if (dep.isRealtime)
+                              Icon(
+                                Icons.rss_feed,
+                                size: 12,
+                                color: isDelayed ? kDelayed : kOnTime,
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Favorite route model ─────────────────────────────────────────────────────
+class FavoriteRoute {
+  final String destinationName;
+  final double destLat;
+  final double destLon;
+  final String? startName;
+  final double? startLat;
+  final double? startLon;
+  final int savedAtMs;
+
+  FavoriteRoute({
+    required this.destinationName,
+    required this.destLat,
+    required this.destLon,
+    this.startName,
+    this.startLat,
+    this.startLon,
+    required this.savedAtMs,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'destinationName': destinationName,
+    'destLat': destLat,
+    'destLon': destLon,
+    'startName': startName,
+    'startLat': startLat,
+    'startLon': startLon,
+    'savedAtMs': savedAtMs,
+  };
+
+  factory FavoriteRoute.fromJson(Map<String, dynamic> json) => FavoriteRoute(
+    destinationName: json['destinationName'],
+    destLat: (json['destLat'] as num).toDouble(),
+    destLon: (json['destLon'] as num).toDouble(),
+    startName: json['startName'],
+    startLat: (json['startLat'] as num?)?.toDouble(),
+    startLon: (json['startLon'] as num?)?.toDouble(),
+    savedAtMs: json['savedAtMs'] ?? 0,
+  );
+
+  String get displayLabel {
+    final dest = destinationName;
+    if (startName != null) return '$startName → $dest';
+    return '📍 → $dest';
+  }
+}
+
 // ─── Main screen ──────────────────────────────────────────────────────────────
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -913,53 +1282,497 @@ class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
   bool _showSearchPanel = true;
 
-  // Pysäkkinäyttö
+  // Stop display
   bool _showBusStops = false;
+  List<Map<String, dynamic>> _rawStops = [];
   List<Marker> _stopMarkers = [];
   bool _isFetchingStops = false;
+  String _stopSearchQuery = '';
+  final TextEditingController _stopSearchController = TextEditingController();
 
-  // <-- MUUTETTU: Haetaan avaimet dotenv:stä
+  // API keys
   final String _digitransitKey = dotenv.env['DIGITRANSIT_KEY'] ?? '';
   final String _walttiClientId = dotenv.env['WALTTI_CLIENT_ID'] ?? '';
   final String _walttiClientSecret = dotenv.env['WALTTI_CLIENT_SECRET'] ?? '';
 
   bool _isLoading = false;
 
-  // Live-bussit
+  // Live buses
   FeedMessage? _latestFeedMessage;
   List<Marker> _busMarkers = [];
   Timer? _liveBusTimer;
-  bool _isLiveTrackingActive = false; // Uusi muuttuja liven tilalle
+  bool _isLiveTrackingActive = false;
+  bool _isFetchingLiveBuses = false; // FIX: prevent concurrent fetches
 
   List<RouteOption> _routeOptions = [];
   int _selectedRouteIndex = 0;
 
   int _minTransferTime = 120;
   double _walkSpeedKmH = 5.0;
-
   double get _walkSpeedMS => _walkSpeedKmH / 3.6;
 
-  // Historia
+  // History
   final List<Map<String, dynamic>> _recentSearches = [];
 
-  // Pysäkkitaulun tiedot
-  List<StopTimeData> _stopBoardDepartures = [];
-  String _stopBoardName = '';
-  bool _isLoadingStopBoard = false;
+  // Favorites
+  List<FavoriteRoute> _favorites = [];
+
+  // Offline cache
+  bool _isShowingOfflineData = false;
 
   @override
   void initState() {
     super.initState();
     _determinePosition();
-    // Huom: Ajastinta ei enää käynnistetä automaattisesti täällä.
+    _loadFavorites();
+    _loadOfflineCache();
+
+    _stopSearchController.addListener(() {
+      setState(() => _stopSearchQuery = _stopSearchController.text);
+      _rebuildStopMarkers();
+    });
   }
 
   @override
   void dispose() {
     _liveBusTimer?.cancel();
+    _stopSearchController.dispose();
     super.dispose();
   }
 
+  // ─── Favorites ────────────────────────────────────────────────────────────
+  Future<void> _loadFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('favorites') ?? [];
+    setState(() {
+      _favorites = raw
+          .map((s) => FavoriteRoute.fromJson(json.decode(s)))
+          .toList();
+    });
+  }
+
+  Future<void> _saveFavoritesToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = _favorites.map((f) => json.encode(f.toJson())).toList();
+    await prefs.setStringList('favorites', raw);
+  }
+
+  void _toggleFavorite() {
+    if (_destinationFeature == null) return;
+
+    final destName = _destinationFeature!['name'] as String;
+    final alreadySaved = _favorites.any((f) => f.destinationName == destName);
+
+    setState(() {
+      if (alreadySaved) {
+        _favorites.removeWhere((f) => f.destinationName == destName);
+        _showSnack('Reitti poistettu suosikeista.');
+      } else {
+        _favorites.insert(
+          0,
+          FavoriteRoute(
+            destinationName: destName,
+            destLat: (_destinationFeature!['lat'] as num).toDouble(),
+            destLon: (_destinationFeature!['lon'] as num).toDouble(),
+            startName: _customStartFeature?['name'],
+            startLat: (_customStartFeature?['lat'] as num?)?.toDouble(),
+            startLon: (_customStartFeature?['lon'] as num?)?.toDouble(),
+            savedAtMs: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+        _showSnack('Reitti tallennettu suosikkeihin!');
+      }
+    });
+    _saveFavoritesToPrefs();
+  }
+
+  bool get _isCurrentDestinationFavorite {
+    if (_destinationFeature == null) return false;
+    final destName = _destinationFeature!['name'] as String;
+    return _favorites.any((f) => f.destinationName == destName);
+  }
+
+  void _showFavoritesSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setModalState) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 4),
+                width: 44,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 8, 20, 4),
+              child: Row(
+                children: [
+                  Icon(Icons.star_rounded, color: kAccent),
+                  SizedBox(width: 10),
+                  Text(
+                    'Suosikkireittisi',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: kPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(),
+            if (_favorites.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'Ei tallennettuja reittejä.\nTallenna reitti tähti-painikkeella reittikortin oikeasta yläkulmasta.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _favorites.length,
+                  itemBuilder: (_, index) {
+                    final fav = _favorites[index];
+                    return ListTile(
+                      leading: const Icon(Icons.star_rounded, color: kAccent),
+                      title: Text(
+                        fav.destinationName,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Row(
+                        children: [
+                          const Icon(Icons.trip_origin, size: 11, color: kWalk),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              fav.startName ?? 'Nykyinen sijainti',
+                              style: const TextStyle(fontSize: 12),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const Icon(
+                            Icons.arrow_forward,
+                            size: 11,
+                            color: Colors.grey,
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(
+                            Icons.location_on,
+                            size: 11,
+                            color: kPrimary,
+                          ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              fav.destinationName,
+                              style: const TextStyle(fontSize: 12),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          color: Colors.red,
+                        ),
+                        onPressed: () {
+                          setState(() => _favorites.removeAt(index));
+                          setModalState(() {});
+                          _saveFavoritesToPrefs();
+                        },
+                      ),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        setState(() {
+                          _destinationFeature = {
+                            'name': fav.destinationName,
+                            'lat': fav.destLat,
+                            'lon': fav.destLon,
+                          };
+                          if (fav.startLat != null) {
+                            _customStartFeature = {
+                              'name': fav.startName ?? '',
+                              'lat': fav.startLat!,
+                              'lon': fav.startLon!,
+                            };
+                          }
+                        });
+                        searchRoute();
+                      },
+                    );
+                  },
+                ),
+              ),
+            SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ─── Offline cache ────────────────────────────────────────────────────────
+  Future<void> _loadOfflineCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedJson = prefs.getString('last_route_options');
+      final cachedDestName = prefs.getString('last_dest_name');
+      final cachedDestLat = prefs.getDouble('last_dest_lat');
+      final cachedDestLon = prefs.getDouble('last_dest_lon');
+
+      if (cachedJson != null && cachedDestLat != null && mounted) {
+        final List<dynamic> rawList = json.decode(cachedJson);
+        final options = rawList
+            .map((item) => RouteOption.fromJson(item as Map<String, dynamic>))
+            .toList();
+
+        if (options.isNotEmpty) {
+          setState(() {
+            _routeOptions = options;
+            _selectedRouteIndex = 0;
+            _isShowingOfflineData = true;
+            if (cachedDestName != null) {
+              _destinationFeature = {
+                'name': cachedDestName,
+                'lat': cachedDestLat,
+                'lon': cachedDestLon ?? 0.0,
+              };
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Offline cache load error: $e');
+    }
+  }
+
+  Future<void> _saveOfflineCache() async {
+    if (_routeOptions.isEmpty || _destinationFeature == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = json.encode(
+        _routeOptions.map((r) => r.toJson()).toList(),
+      );
+      await prefs.setString('last_route_options', jsonStr);
+      await prefs.setString(
+        'last_dest_name',
+        _destinationFeature!['name'] ?? '',
+      );
+      await prefs.setDouble(
+        'last_dest_lat',
+        (_destinationFeature!['lat'] as num).toDouble(),
+      );
+      await prefs.setDouble(
+        'last_dest_lon',
+        (_destinationFeature!['lon'] as num).toDouble(),
+      );
+    } catch (e) {
+      debugPrint('Offline cache save error: $e');
+    }
+  }
+
+  // ─── Share route ──────────────────────────────────────────────────────────
+  void _shareRoute(RouteOption option) {
+    final buf = StringBuffer();
+    buf.writeln('🚌 Pohjoisen Reitit');
+    buf.writeln('Lähde klo ${_formatTime(option.leaveHomeTime)}');
+
+    for (final leg in option.busLegs) {
+      buf.writeln(
+        '→ Linja ${leg.busNumber}: ${leg.fromStop} → ${leg.toStop} (klo ${_formatTime(leg.departureTime)})',
+      );
+    }
+
+    buf.writeln('Perillä klo ${_formatTime(option.arrivalTime)}');
+    buf.writeln(
+      'Matka-aika: ${option.arrivalTime.difference(option.leaveHomeTime).inMinutes} min',
+    );
+
+    Clipboard.setData(ClipboardData(text: buf.toString()));
+    _showSnack('Reittitiedot kopioitu leikepöydälle!');
+  }
+
+  // ─── Stop display ─────────────────────────────────────────────────────────
+  void _rebuildStopMarkers() {
+    final query = _stopSearchQuery.toLowerCase();
+    final filtered = query.isEmpty
+        ? _rawStops
+        : _rawStops
+              .where((s) => (s['name'] as String).toLowerCase().contains(query))
+              .toList();
+
+    setState(() {
+      _stopMarkers = filtered.map((stop) => _buildStopMarker(stop)).toList();
+    });
+  }
+
+  Marker _buildStopMarker(Map<String, dynamic> stop) {
+    return Marker(
+      point: LatLng(
+        (stop['lat'] as num).toDouble(),
+        (stop['lon'] as num).toDouble(),
+      ),
+      width: 15,
+      height: 15,
+      child: GestureDetector(
+        onTap: () => _showStopOptions(stop),
+        child: _StopDot(stop['name'] ?? ''),
+      ),
+    );
+  }
+
+  void _showStopOptions(Map<String, dynamic> stop) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 4),
+                width: 44,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.transfer_within_a_station, color: kStop),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      stop['name'] ?? '',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: kStop,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.schedule, color: kBus),
+              title: const Text('Näytä aikataulu'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _openStopBoard(stop);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.trip_origin, color: kWalk),
+              title: const Text('Aseta lähtöpisteeksi'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _customStartFeature = {
+                    'name': stop['name'],
+                    'lat': (stop['lat'] as num).toDouble(),
+                    'lon': (stop['lon'] as num).toDouble(),
+                  };
+                });
+                if (_destinationFeature != null) searchRoute();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.location_on, color: kPrimary),
+              title: const Text('Aseta määränpääksi'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _destinationFeature = {
+                    'name': stop['name'],
+                    'lat': (stop['lat'] as num).toDouble(),
+                    'lon': (stop['lon'] as num).toDouble(),
+                  };
+                  _showSearchPanel = false;
+                });
+                searchRoute();
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openStopBoard(Map<String, dynamic> stop) {
+    final stopLat = (stop['lat'] as num).toDouble();
+    final stopLon = (stop['lon'] as num).toDouble();
+    final stopName = stop['name'] as String? ?? '';
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.92,
+        builder: (ctx2, scrollController) => _StopBoardSheet(
+          stopId: stop['gtfsId'] ?? '',
+          stopName: stopName,
+          digitransitKey: _digitransitKey,
+          formatTime: _formatTime,
+          scrollController: scrollController,
+          onSetAsStart: () {
+            Navigator.pop(ctx);
+            setState(() {
+              _customStartFeature = {
+                'name': stopName,
+                'lat': stopLat,
+                'lon': stopLon,
+              };
+            });
+            if (_destinationFeature != null) searchRoute();
+          },
+          onSetAsDestination: () {
+            Navigator.pop(ctx);
+            setState(() {
+              _destinationFeature = {
+                'name': stopName,
+                'lat': stopLat,
+                'lon': stopLon,
+              };
+              _showSearchPanel = false;
+            });
+            searchRoute();
+          },
+        ),
+      ),
+    );
+  }
+
+  // ─── Snackbar ─────────────────────────────────────────────────────────────
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -972,10 +1785,9 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // ─── Live tracking ────────────────────────────────────────────────────────
   void _toggleLiveTracking() {
-    setState(() {
-      _isLiveTrackingActive = !_isLiveTrackingActive;
-    });
+    setState(() => _isLiveTrackingActive = !_isLiveTrackingActive);
 
     if (_isLiveTrackingActive) {
       fetchLiveBuses(showSnack: true);
@@ -984,13 +1796,12 @@ class _MapScreenState extends State<MapScreen> {
       });
     } else {
       _liveBusTimer?.cancel();
-      setState(() {
-        _busMarkers = []; // Tyhjennä bussit kartalta kun live otetaan pois
-      });
+      setState(() => _busMarkers = []);
       _showSnack('Reaaliaikainen seuranta sammutettu.');
     }
   }
 
+  // ─── Location ─────────────────────────────────────────────────────────────
   Future<void> _determinePosition() async {
     if (!Platform.isAndroid && !Platform.isIOS) {
       _showSnack(
@@ -1020,7 +1831,6 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     try {
-      // Tässä on päivitetty kohta: käytetään locationSettings-parametria
       geo.Position position = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -1042,9 +1852,7 @@ class _MapScreenState extends State<MapScreen> {
       _departureTime = DateTime.now();
     });
     _mapController.move(_currentLocation, 14.0);
-    if (_destinationFeature != null) {
-      searchRoute();
-    }
+    if (_destinationFeature != null) searchRoute();
   }
 
   void _swapLocations() {
@@ -1053,9 +1861,7 @@ class _MapScreenState extends State<MapScreen> {
       _customStartFeature = _destinationFeature;
       _destinationFeature = temp;
     });
-    if (_destinationFeature != null) {
-      searchRoute();
-    }
+    if (_destinationFeature != null) searchRoute();
   }
 
   String _formatTime(DateTime t) =>
@@ -1100,22 +1906,16 @@ class _MapScreenState extends State<MapScreen> {
       final routeId = vehicle.trip.routeId;
       final pos = vehicle.position;
 
-      bool matches = false;
-
-      if (_routeOptions.isEmpty) {
-        matches = true;
-      } else {
-        if (activeRouteIds.contains(routeId) ||
-            activeBusNumbers.contains(routeId) ||
-            activeBusNumbers.any(
-              (busNum) =>
-                  routeId.endsWith(':$busNum') ||
-                  routeId.endsWith('_$busNum') ||
-                  routeId == busNum,
-            )) {
-          matches = true;
-        }
-      }
+      bool matches =
+          _routeOptions.isEmpty ||
+          activeRouteIds.contains(routeId) ||
+          activeBusNumbers.contains(routeId) ||
+          activeBusNumbers.any(
+            (busNum) =>
+                routeId.endsWith(':$busNum') ||
+                routeId.endsWith('_$busNum') ||
+                routeId == busNum,
+          );
 
       if (!matches) continue;
 
@@ -1150,198 +1950,7 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _busMarkers = markers);
   }
 
-  // ─── Pysäkkitaulun haku ─────────────────────────────────────────────────
-  Future<void> _fetchStopBoard(String stopId, String stopName) async {
-    setState(() {
-      _isLoadingStopBoard = true;
-      _stopBoardName = stopName;
-      _stopBoardDepartures = [];
-    });
-
-    final routeUrl = Uri.parse(
-      'https://api.digitransit.fi/routing/v2/waltti/gtfs/v1',
-    );
-    final startTimeSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-
-    final String query =
-        """
-    {
-      stop(id: "$stopId") {
-        stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 20) {
-          scheduledDeparture
-          realtimeDeparture
-          realtimeState
-          realtime
-          serviceDay
-          headsign
-          trip { route { shortName } }
-        }
-      }
-    }
-    """;
-
-    try {
-      final response = await http.post(
-        routeUrl,
-        headers: {
-          'Content-Type': 'application/json',
-          'digitransit-subscription-key': _digitransitKey,
-        },
-        body: json.encode({'query': query}),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        var stoptimes =
-            data['data']?['stop']?['stoptimesWithoutPatterns']
-                as List<dynamic>?;
-
-        if (stoptimes != null) {
-          List<StopTimeData> departures = [];
-          for (var st in stoptimes) {
-            String? rName = st['trip']?['route']?['shortName'];
-            int? schedDep = st['scheduledDeparture'];
-            int? realDep = st['realtimeDeparture'];
-            int? serviceDay = st['serviceDay'];
-            String rtState = st['realtimeState'] ?? 'SCHEDULED';
-            bool isRt = st['realtime'] ?? false;
-            String headsign = st['headsign'] ?? '';
-
-            if (rName != null && schedDep != null && serviceDay != null) {
-              departures.add(
-                StopTimeData(
-                  scheduledEpochSec: serviceDay + schedDep,
-                  realtimeEpochSec: serviceDay + (realDep ?? schedDep),
-                  realtimeState: rtState,
-                  isRealtime: isRt,
-                  busNumber: rName,
-                  headsign: headsign,
-                ),
-              );
-            }
-          }
-          setState(() {
-            _stopBoardDepartures = departures;
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint('Error fetching stop board: $e');
-    } finally {
-      setState(() {
-        _isLoadingStopBoard = false;
-      });
-      _showStopBoardSheet();
-    }
-  }
-
-  void _showStopBoardSheet() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-            return Container(
-              padding: const EdgeInsets.only(top: 12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[300],
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.transfer_within_a_station,
-                          color: kStop,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            _stopBoardName,
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: kStop,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Divider(),
-                  Expanded(
-                    child: _isLoadingStopBoard
-                        ? const Center(child: CircularProgressIndicator())
-                        : _stopBoardDepartures.isEmpty
-                        ? const Center(
-                            child: Text('Ei tulevia lähtöjä lähiaikoina.'),
-                          )
-                        : ListView.builder(
-                            itemCount: _stopBoardDepartures.length,
-                            itemBuilder: (context, index) {
-                              final dep = _stopBoardDepartures[index];
-                              final depTime =
-                                  DateTime.fromMillisecondsSinceEpoch(
-                                    dep.realtimeEpochSec * 1000,
-                                  );
-                              final bool isDelayed =
-                                  dep.isRealtime &&
-                                  dep.realtimeEpochSec > dep.scheduledEpochSec;
-
-                              return ListTile(
-                                leading: _BusNumberBadge(dep.busNumber ?? ''),
-                                title: Text(
-                                  dep.headsign ?? 'Päätepysäkki puuttuu',
-                                ),
-                                trailing: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      _formatTime(depTime),
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 16,
-                                        color: isDelayed
-                                            ? kDelayed
-                                            : (dep.isRealtime
-                                                  ? kOnTime
-                                                  : Colors.black87),
-                                      ),
-                                    ),
-                                    if (dep.isRealtime)
-                                      Icon(
-                                        Icons.rss_feed,
-                                        size: 12,
-                                        color: isDelayed ? kDelayed : kOnTime,
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
+  // ─── Nearby stops ─────────────────────────────────────────────────────────
   Future<void> _fetchNearbyStops() async {
     if (_isFetchingStops) return;
     _isFetchingStops = true;
@@ -1352,15 +1961,15 @@ class _MapScreenState extends State<MapScreen> {
 
       final String query =
           """
-        {
-          stopsByBbox(
-            minLat: ${bounds.south}, minLon: ${bounds.west},
-            maxLat: ${bounds.north}, maxLon: ${bounds.east}
-          ) {
-            gtfsId name lat lon
-          }
-        }
-      """;
+            {
+              stopsByBbox(
+                minLat: ${bounds.south}, minLon: ${bounds.west},
+                maxLat: ${bounds.north}, maxLon: ${bounds.east}
+              ) {
+                gtfsId name lat lon
+              }
+            }
+            """;
 
       final response = await http.post(
         Uri.parse('https://api.digitransit.fi/routing/v2/waltti/gtfs/v1'),
@@ -1377,21 +1986,9 @@ class _MapScreenState extends State<MapScreen> {
 
         if (stops != null && mounted) {
           setState(() {
-            _stopMarkers = stops.map((stop) {
-              return Marker(
-                point: LatLng(
-                  (stop['lat'] as num).toDouble(),
-                  (stop['lon'] as num).toDouble(),
-                ),
-                width: 15,
-                height: 15, // Suurempi touch target
-                child: GestureDetector(
-                  onTap: () => _fetchStopBoard(stop['gtfsId'], stop['name']),
-                  child: _StopDot(stop['name'] ?? ''),
-                ),
-              );
-            }).toList();
+            _rawStops = stops.map((s) => Map<String, dynamic>.from(s)).toList();
           });
+          _rebuildStopMarkers();
         }
       }
     } catch (e) {
@@ -1469,26 +2066,21 @@ class _MapScreenState extends State<MapScreen> {
       );
     });
 
-    if (_destinationFeature != null) {
-      searchRoute();
-    }
+    if (_destinationFeature != null) searchRoute();
   }
 
-  // ─── Autocomplete haku ──────────────────────────────────────────────────
+  // ─── Autocomplete ─────────────────────────────────────────────────────────
   Future<List<Map<String, dynamic>>> _getAutocompleteSuggestions(
     String query,
   ) async {
-    if (query.isEmpty) return _recentSearches; // Näytä historia jos tyhjä
+    if (query.isEmpty) return _recentSearches;
 
     try {
-      // PÄIVITETTY ALUE:
-      // min_lat: 64.7 (Etelä: Liminka/Lumijoki)
-      // max_lat: 65.45 (Pohjoinen: Ii/Yli-Ii)
-      // min_lon: 24.9 (Länsi: Hailuoto/meri)
-      // max_lon: 26.5 (Itä: Ylikiiminki)
       final response = await http.get(
         Uri.parse(
-          'https://api.digitransit.fi/geocoding/v1/autocomplete?text=$query&boundary.rect.min_lat=64.7&boundary.rect.max_lat=65.45&boundary.rect.min_lon=24.9&boundary.rect.max_lon=26.5',
+          'https://api.digitransit.fi/geocoding/v1/autocomplete?text=$query'
+          '&boundary.rect.min_lat=64.7&boundary.rect.max_lat=65.45'
+          '&boundary.rect.min_lon=24.9&boundary.rect.max_lon=26.5',
         ),
         headers: {'digitransit-subscription-key': _digitransitKey},
       );
@@ -1520,6 +2112,7 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
+  // ─── Route search ─────────────────────────────────────────────────────────
   Future<void> searchRoute() async {
     if (_destinationFeature == null) return;
 
@@ -1527,6 +2120,7 @@ class _MapScreenState extends State<MapScreen> {
       _isLoading = true;
       _routeOptions.clear();
       _showSearchPanel = false;
+      _isShowingOfflineData = false;
     });
     FocusScope.of(context).unfocus();
 
@@ -1563,14 +2157,10 @@ class _MapScreenState extends State<MapScreen> {
             arriveBy: false
           ) {
             itineraries {
-              startTime
-              endTime
+              startTime endTime
               legs {
-                mode
-                startTime
-                endTime
-                distance
-                route { shortName gtfsId }
+                mode startTime endTime distance
+                route { shortName gtfsId alerts { alertHeaderText } }
                 from { name lat lon stop { gtfsId } }
                 to { name lat lon }
                 legGeometry { points }
@@ -1634,7 +2224,7 @@ class _MapScreenState extends State<MapScreen> {
 
           List<RouteSegment> segments = [];
           List<BusLeg> busLegs = [];
-          List<double> walkDistances = []; // Uusi lista kävelymatkoille
+          List<double> walkDistances = [];
 
           for (var leg in itinerary['legs']) {
             if (leg['mode'] == 'WALK') {
@@ -1642,12 +2232,7 @@ class _MapScreenState extends State<MapScreen> {
             }
 
             if (leg['mode'] == 'BUS') {
-              String stopId = '';
-              if (leg['from'] != null &&
-                  leg['from']['stop'] != null &&
-                  leg['from']['stop']['gtfsId'] != null) {
-                stopId = leg['from']['stop']['gtfsId'];
-              }
+              String stopId = leg['from']?['stop']?['gtfsId'] ?? '';
               DateTime scheduledDep = DateTime.fromMillisecondsSinceEpoch(
                 leg['startTime'],
               );
@@ -1673,6 +2258,18 @@ class _MapScreenState extends State<MapScreen> {
                 }
               }
 
+              // Parse alerts
+              List<AlertInfo> alerts = [];
+              final rawAlerts = leg['route']?['alerts'] as List<dynamic>?;
+              if (rawAlerts != null) {
+                for (var a in rawAlerts) {
+                  final text = a['alertHeaderText'];
+                  if (text != null && text.toString().isNotEmpty) {
+                    alerts.add(AlertInfo(text: text.toString()));
+                  }
+                }
+              }
+
               busLegs.add(
                 BusLeg(
                   busNumber: leg['route']['shortName'] ?? 'Bussi',
@@ -1692,12 +2289,12 @@ class _MapScreenState extends State<MapScreen> {
                   realtimeState: 'SCHEDULED',
                   isRealtime: false,
                   intermediateStops: intermediateStops,
+                  alerts: alerts,
                 ),
               );
             }
 
-            if (leg['legGeometry'] != null &&
-                leg['legGeometry']['points'] != null) {
+            if (leg['legGeometry']?['points'] != null) {
               List<PointLatLng> result = PolylinePoints.decodePolyline(
                 leg['legGeometry']['points'],
               );
@@ -1721,12 +2318,12 @@ class _MapScreenState extends State<MapScreen> {
               arrivalTime: arrival,
               busLegs: busLegs,
               segments: segments,
-              walkDistances: walkDistances, // Lisätty
+              walkDistances: walkDistances,
             ),
           );
         }
 
-        // Timetable extension
+        // ─ Timetable extension ────────────────────────────────────────
         Set<String> stopIdsToQuery = {};
         for (var opt in parsedOptions) {
           if (opt.busLegs.isNotEmpty &&
@@ -1736,21 +2333,21 @@ class _MapScreenState extends State<MapScreen> {
         }
 
         if (stopIdsToQuery.isNotEmpty) {
-          String stopQueries = "";
+          String stopQueries = '';
           int i = 0;
           final startTimeSec = _departureTime.millisecondsSinceEpoch ~/ 1000;
 
           for (String stopId in stopIdsToQuery) {
             stopQueries +=
                 """
-              stop$i: stop(id: "$stopId") {
-                gtfsId
-                stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 30) {
-                  scheduledDeparture realtimeDeparture realtimeState realtime serviceDay
-                  trip { route { shortName } }
-                }
-              }
-            """;
+                        stop$i: stop(id: "$stopId") {
+                          gtfsId
+                          stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 30) {
+                            scheduledDeparture realtimeDeparture realtimeState realtime serviceDay
+                            trip { route { shortName } }
+                          }
+                        }
+                        """;
             i++;
           }
 
@@ -1866,6 +2463,7 @@ class _MapScreenState extends State<MapScreen> {
                             realtimeState: state,
                             isRealtime: isRt,
                             intermediateStops: baseLeg.intermediateStops,
+                            alerts: baseLeg.alerts,
                           ),
                         );
                       }
@@ -1926,6 +2524,7 @@ class _MapScreenState extends State<MapScreen> {
           _selectedRouteIndex = 0;
         });
         _updateBusMarkers();
+        _saveOfflineCache();
 
         if (parsedOptions.isNotEmpty) {
           final allPoints = parsedOptions[0].segments
@@ -1950,6 +2549,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Future<void> fetchLiveBuses({bool showSnack = true}) async {
+    // FIX: prevent concurrent fetches
+    if (_isFetchingLiveBuses) return;
+    _isFetchingLiveBuses = true;
+
     final String encodedCredentials = base64Encode(
       utf8.encode('$_walttiClientId:$_walttiClientSecret'),
     );
@@ -1977,6 +2580,8 @@ class _MapScreenState extends State<MapScreen> {
       if (showSnack) {
         _showSnack('Virhe Waltti-haussa: $e');
       }
+    } finally {
+      _isFetchingLiveBuses = false;
     }
   }
 
@@ -2055,7 +2660,7 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ─── Search panel with Autocomplete ──────────────────────────────────────────
+  // ─── Search panel ─────────────────────────────────────────────────────────
   Widget _buildSearchPanel() {
     final now = DateTime.now();
     final bool isToday =
@@ -2078,7 +2683,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
               child: Column(
                 children: [
-                  // LÄHTÖPISTE
+                  // Start field
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 10, 4, 6),
                     child: Row(
@@ -2109,15 +2714,19 @@ class _MapScreenState extends State<MapScreen> {
                                   focusNode,
                                   onFieldSubmitted,
                                 ) {
-                                  // Päivitetään kenttä jos napataan kartalta
-                                  if (_customStartFeature != null &&
-                                      controller.text !=
-                                          _customStartFeature!['name']) {
-                                    controller.text =
-                                        _customStartFeature!['name'];
-                                  } else if (_customStartFeature == null &&
-                                      controller.text.isNotEmpty) {
-                                    controller.text = '';
+                                  // FIX: only update controller when user is not actively typing
+                                  if (!focusNode.hasFocus) {
+                                    final expected =
+                                        _customStartFeature?['name'] ?? '';
+                                    if (controller.text != expected) {
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                            if (mounted &&
+                                                !focusNode.hasFocus) {
+                                              controller.text = expected;
+                                            }
+                                          });
+                                    }
                                   }
                                   return TextField(
                                     controller: controller,
@@ -2140,8 +2749,7 @@ class _MapScreenState extends State<MapScreen> {
                                   borderRadius: BorderRadius.circular(8),
                                   child: Container(
                                     width:
-                                        MediaQuery.of(context).size.width -
-                                        100, // Approximate width
+                                        MediaQuery.of(context).size.width - 100,
                                     constraints: const BoxConstraints(
                                       maxHeight: 250,
                                     ),
@@ -2214,7 +2822,7 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
 
-                  // SWAP NAPPI & DIVIDER
+                  // Swap button
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 14),
                     child: Row(
@@ -2247,7 +2855,7 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
 
-                  // KOHDEPISTE
+                  // Destination field
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 6, 4, 10),
                     child: Row(
@@ -2282,11 +2890,19 @@ class _MapScreenState extends State<MapScreen> {
                                   focusNode,
                                   onFieldSubmitted,
                                 ) {
-                                  if (_destinationFeature != null &&
-                                      controller.text !=
-                                          _destinationFeature!['name']) {
-                                    controller.text =
-                                        _destinationFeature!['name'];
+                                  // FIX: only update controller when user is not actively typing
+                                  if (!focusNode.hasFocus) {
+                                    final expected =
+                                        _destinationFeature?['name'] ?? '';
+                                    if (controller.text != expected) {
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                            if (mounted &&
+                                                !focusNode.hasFocus) {
+                                              controller.text = expected;
+                                            }
+                                          });
+                                    }
                                   }
                                   return TextField(
                                     controller: controller,
@@ -2309,8 +2925,7 @@ class _MapScreenState extends State<MapScreen> {
                                   borderRadius: BorderRadius.circular(8),
                                   child: Container(
                                     width:
-                                        MediaQuery.of(context).size.width -
-                                        100, // Approximate width
+                                        MediaQuery.of(context).size.width - 100,
                                     constraints: const BoxConstraints(
                                       maxHeight: 250,
                                     ),
@@ -2376,7 +2991,69 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
 
-                  // AIKA
+                  // Favorites star button
+                  if (_favorites.isNotEmpty) ...[
+                    const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+                      child: GestureDetector(
+                        onTap: _showFavoritesSheet,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: kAccent.withValues(alpha: 0.13),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: kAccent.withValues(alpha: 0.45),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.star_rounded,
+                                size: 16,
+                                color: kAccent,
+                              ),
+                              const SizedBox(width: 6),
+                              const Text(
+                                'Suosikit',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF664400),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: kAccent,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  '${_favorites.length}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF3D2B00),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // Time picker
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
                     child: GestureDetector(
@@ -2422,119 +3099,260 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ─── Route bottom sheet ────────────────────────────────────────────────────
+  // ─── Stop search overlay ──────────────────────────────────────────────────
+  Widget _buildStopSearchOverlay() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.search, color: kStop, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _stopSearchController,
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                hintText: 'Suodata pysäkkejä nimellä...',
+                hintStyle: TextStyle(color: Colors.grey, fontSize: 13),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          ),
+          if (_stopSearchQuery.isNotEmpty)
+            GestureDetector(
+              onTap: () {
+                _stopSearchController.clear();
+                setState(() => _stopSearchQuery = '');
+                _rebuildStopMarkers();
+              },
+              child: const Icon(Icons.close, color: Colors.grey, size: 16),
+            ),
+          if (_stopMarkers.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(left: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: kStop.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '${_stopMarkers.length}',
+                style: const TextStyle(
+                  color: kStop,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Route bottom sheet ───────────────────────────────────────────────────
   Widget _buildRouteSheet() {
-    // 1. Haetaan näytön kokonaiskorkeus ja navigaatiopalkin viemä tila
     final screenHeight = MediaQuery.of(context).size.height;
     final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final keyboardHeight = MediaQuery.of(
+      context,
+    ).viewInsets.bottom; // FIX: keyboard
 
-    // 2. Lasketaan tarvittava pikselimäärä (Kahva n. 20px + Otsikko n. 35px + vähän ilmaa = 65px)
-    // Lisätään tähän puhelimen oma navigaatiopalkin korkeus
     final double minVisiblePixels = 65.0 + bottomPadding;
-
-    // 3. Muutetaan pikselit prosenteiksi DraggableScrollableSheetia varten (rajoitetaan välille 10-30%)
     final double minSheetSize = (minVisiblePixels / screenHeight).clamp(
       0.1,
       0.3,
     );
 
-    return DraggableScrollableSheet(
-      initialChildSize: 0.38,
-      minChildSize: minSheetSize, // <-- Käytetään laskettua dynaamista kokoa
-      maxChildSize: 0.72,
-      snap: true,
-      snapSizes: [
-        minSheetSize,
-        0.38,
-        0.72,
-      ], // <-- Vaihdetaan ensimmäinen pykälä myös
-      builder: (context, scrollController) {
-        return Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black26,
-                blurRadius: 24,
-                offset: Offset(0, -4),
-              ),
-            ],
-          ),
-          child: ListView(
-            controller: scrollController,
-            padding: EdgeInsets.zero,
-            children: [
-              Center(
-                child: Container(
-                  margin: const EdgeInsets.only(top: 12, bottom: 4),
-                  width: 44,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(2),
+    return AnimatedPadding(
+      // FIX: push sheet up when keyboard appears
+      duration: const Duration(milliseconds: 150),
+      padding: EdgeInsets.only(bottom: keyboardHeight),
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.38,
+        minChildSize: minSheetSize,
+        maxChildSize: 0.72,
+        snap: true,
+        snapSizes: [minSheetSize, 0.38, 0.72],
+        builder: (context, scrollController) {
+          return Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black26,
+                  blurRadius: 24,
+                  offset: Offset(0, -4),
+                ),
+              ],
+            ),
+            child: ListView(
+              controller: scrollController,
+              padding: EdgeInsets.zero,
+              children: [
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.only(top: 12, bottom: 4),
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                child: Row(
-                  children: [
-                    const Text(
-                      'Reittivaihtoehdot',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF222222),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 8, 8),
+                  child: Row(
+                    children: [
+                      const Text(
+                        'Reittivaihtoehdot',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF222222),
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    if (_routeOptions.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: kPrimary.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          '${_routeOptions.length} kpl',
-                          style: const TextStyle(
-                            color: kPrimary,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 12,
+                      const Spacer(),
+                      // Favorites button
+                      GestureDetector(
+                        onTap: _showFavoritesSheet,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _favorites.isNotEmpty
+                                ? kAccent.withValues(alpha: 0.15)
+                                : kSurface,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: _favorites.isNotEmpty
+                                  ? kAccent.withValues(alpha: 0.5)
+                                  : Colors.transparent,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.star_rounded,
+                                size: 16,
+                                color: _favorites.isNotEmpty
+                                    ? kAccent
+                                    : Colors.grey,
+                              ),
+                              if (_favorites.isNotEmpty) ...[
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_favorites.length}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF996600),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                       ),
-                  ],
-                ),
-              ),
-              if (_isLoading)
-                for (int i = 0; i < 3; i++) const _ShimmerCard(),
-              if (!_isLoading)
-                for (int i = 0; i < _routeOptions.length; i++)
-                  _RouteCard(
-                    option: _routeOptions[i],
-                    isSelected: _selectedRouteIndex == i,
-                    formatTime: _formatTime,
-                    onTap: () {
-                      setState(() => _selectedRouteIndex = i);
-                      _updateBusMarkers();
-                      _zoomToRoute(i);
-                    },
+                      const SizedBox(width: 8),
+                      // Offline indicator
+                      if (_isShowingOfflineData)
+                        Container(
+                          margin: const EdgeInsets.only(right: 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.wifi_off,
+                                size: 12,
+                                color: Colors.orange,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'Offline',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.orange,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (_routeOptions.isNotEmpty)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: kPrimary.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${_routeOptions.length} kpl',
+                            style: const TextStyle(
+                              color: kPrimary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-              // Pidetään kiinni aiemmasta korjauksesta: lisätilaa listan pohjalle
-              SizedBox(height: 24 + MediaQuery.of(context).padding.bottom),
-            ],
-          ),
-        );
-      },
+                ),
+                if (_isLoading)
+                  for (int i = 0; i < 3; i++) const _ShimmerCard(),
+                if (!_isLoading)
+                  for (int i = 0; i < _routeOptions.length; i++)
+                    _RouteCard(
+                      option: _routeOptions[i],
+                      isSelected: _selectedRouteIndex == i,
+                      isFavorite: _isCurrentDestinationFavorite,
+                      isOfflineData: _isShowingOfflineData,
+                      formatTime: _formatTime,
+                      onTap: () {
+                        setState(() => _selectedRouteIndex = i);
+                        _updateBusMarkers();
+                        _zoomToRoute(i);
+                      },
+                      onToggleFavorite: _toggleFavorite,
+                      onShare: () => _shareRoute(_routeOptions[i]),
+                    ),
+                SizedBox(height: 24 + MediaQuery.of(context).padding.bottom),
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 
-  // ─── Main build ────────────────────────────────────────────────────────────
+  // ─── Build ────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final List<RouteSegment> currentSegments = _routeOptions.isNotEmpty
@@ -2543,6 +3361,8 @@ class _MapScreenState extends State<MapScreen> {
     final List<Marker> routeStopMarkers = _buildRouteStopMarkers();
 
     return Scaffold(
+      // FIX: explicit keyboard handling
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         toolbarHeight: 52,
         backgroundColor: kPrimary,
@@ -2575,7 +3395,12 @@ class _MapScreenState extends State<MapScreen> {
               if (_showBusStops) {
                 await _fetchNearbyStops();
               } else {
-                setState(() => _stopMarkers = []);
+                _stopSearchController.clear();
+                setState(() {
+                  _rawStops = [];
+                  _stopMarkers = [];
+                  _stopSearchQuery = '';
+                });
               }
             },
           ),
@@ -2702,8 +3527,19 @@ class _MapScreenState extends State<MapScreen> {
             ],
           ),
 
+          // Search panel
           Positioned(top: 12, left: 12, right: 12, child: _buildSearchPanel()),
 
+          // Stop search overlay
+          if (_showBusStops)
+            Positioned(
+              bottom: (_routeOptions.isNotEmpty || _isLoading) ? 270 : 80,
+              left: 16,
+              right: 80,
+              child: _buildStopSearchOverlay(),
+            ),
+
+          // Selecting start hint
           if (_isSelectingStart)
             Positioned(
               top: _showSearchPanel ? 210 : 16,
@@ -2745,57 +3581,15 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // Pysäkkimäärä-badge
-          if (_showBusStops)
-            Positioned(
-              bottom: (_routeOptions.isNotEmpty || _isLoading) ? 310 : 20,
-              right: 16,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: kStop.withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: kStop, width: 2),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      '${_stopMarkers.length} pysäkkiä',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
+          // Route sheet
           if (_routeOptions.isNotEmpty || _isLoading) _buildRouteSheet(),
         ],
       ),
-      // UUSI FloatingActionButton live-seurannan käynnistämiseen/sammuttamiseen
       floatingActionButton: Padding(
-        // SÄÄDÄ TÄTÄ LUKUA (esim. 0.0, 30.0 tai 80.0) muuttaaksesi korkeutta
         padding: const EdgeInsets.only(bottom: 40.0),
         child: FloatingActionButton.extended(
           onPressed: _toggleLiveTracking,
           backgroundColor: _isLiveTrackingActive ? kDelayed : kLiveBus,
-          // Jos kLivebus (keltainen), ikoni ja teksti tummiksi:
           foregroundColor: _isLiveTrackingActive ? Colors.white : kPrimaryDark,
           elevation: 4,
           icon: Icon(
@@ -2809,12 +3603,26 @@ class _MapScreenState extends State<MapScreen> {
 }
 
 // ─── Data models ──────────────────────────────────────────────────────────────
+class AlertInfo {
+  final String text;
+  AlertInfo({required this.text});
+}
+
 class IntermediateStop {
   final String name;
   final double lat;
   final double lon;
 
   IntermediateStop({required this.name, required this.lat, required this.lon});
+
+  Map<String, dynamic> toJson() => {'name': name, 'lat': lat, 'lon': lon};
+
+  factory IntermediateStop.fromJson(Map<String, dynamic> json) =>
+      IntermediateStop(
+        name: json['name'] ?? '',
+        lat: (json['lat'] as num).toDouble(),
+        lon: (json['lon'] as num).toDouble(),
+      );
 }
 
 class StopTimeData {
@@ -2851,6 +3659,7 @@ class BusLeg {
   final String realtimeState;
   final bool isRealtime;
   final List<IntermediateStop> intermediateStops;
+  final List<AlertInfo> alerts;
 
   BusLeg({
     required this.busNumber,
@@ -2868,7 +3677,54 @@ class BusLeg {
     required this.realtimeState,
     required this.isRealtime,
     this.intermediateStops = const [],
+    this.alerts = const [],
   });
+
+  Map<String, dynamic> toJson() => {
+    'busNumber': busNumber,
+    'routeGtfsId': routeGtfsId,
+    'fromStop': fromStop,
+    'fromStopId': fromStopId,
+    'fromLat': fromLat,
+    'fromLon': fromLon,
+    'toStop': toStop,
+    'toLat': toLat,
+    'toLon': toLon,
+    'departureTime': departureTime.millisecondsSinceEpoch,
+    'arrivalTime': arrivalTime.millisecondsSinceEpoch,
+    'realtimeDeparture': realtimeDeparture.millisecondsSinceEpoch,
+    'realtimeState': realtimeState,
+    'isRealtime': isRealtime,
+    'intermediateStops': intermediateStops.map((s) => s.toJson()).toList(),
+    'alerts': alerts.map((a) => a.text).toList(),
+  };
+
+  factory BusLeg.fromJson(Map<String, dynamic> json) => BusLeg(
+    busNumber: json['busNumber'] ?? '',
+    routeGtfsId: json['routeGtfsId'] ?? '',
+    fromStop: json['fromStop'] ?? '',
+    fromStopId: json['fromStopId'] ?? '',
+    fromLat: (json['fromLat'] as num?)?.toDouble(),
+    fromLon: (json['fromLon'] as num?)?.toDouble(),
+    toStop: json['toStop'] ?? '',
+    toLat: (json['toLat'] as num?)?.toDouble(),
+    toLon: (json['toLon'] as num?)?.toDouble(),
+    departureTime: DateTime.fromMillisecondsSinceEpoch(
+      json['departureTime'] ?? 0,
+    ),
+    arrivalTime: DateTime.fromMillisecondsSinceEpoch(json['arrivalTime'] ?? 0),
+    realtimeDeparture: DateTime.fromMillisecondsSinceEpoch(
+      json['realtimeDeparture'] ?? 0,
+    ),
+    realtimeState: json['realtimeState'] ?? 'SCHEDULED',
+    isRealtime: json['isRealtime'] ?? false,
+    intermediateStops: (json['intermediateStops'] as List? ?? [])
+        .map((s) => IntermediateStop.fromJson(s as Map<String, dynamic>))
+        .toList(),
+    alerts: (json['alerts'] as List? ?? [])
+        .map((a) => AlertInfo(text: a.toString()))
+        .toList(),
+  );
 }
 
 class RouteSegment {
@@ -2892,4 +3748,26 @@ class RouteOption {
     required this.segments,
     this.walkDistances = const [],
   });
+
+  Map<String, dynamic> toJson() => {
+    'leaveHomeTime': leaveHomeTime.millisecondsSinceEpoch,
+    'arrivalTime': arrivalTime.millisecondsSinceEpoch,
+    'walkDistances': walkDistances,
+    'busLegs': busLegs.map((l) => l.toJson()).toList(),
+    // segments are omitted – cannot be shown on map when offline
+  };
+
+  factory RouteOption.fromJson(Map<String, dynamic> json) => RouteOption(
+    leaveHomeTime: DateTime.fromMillisecondsSinceEpoch(
+      json['leaveHomeTime'] ?? 0,
+    ),
+    arrivalTime: DateTime.fromMillisecondsSinceEpoch(json['arrivalTime'] ?? 0),
+    walkDistances: List<double>.from(
+      (json['walkDistances'] as List? ?? []).map((v) => (v as num).toDouble()),
+    ),
+    busLegs: (json['busLegs'] as List? ?? [])
+        .map((l) => BusLeg.fromJson(l as Map<String, dynamic>))
+        .toList(),
+    segments: [], // empty when loaded from offline cache
+  );
 }
