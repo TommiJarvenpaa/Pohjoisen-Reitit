@@ -154,7 +154,26 @@ class BusLeg {
 class RouteSegment {
   final List<LatLng> points;
   final bool isWalk;
+
   RouteSegment({required this.points, required this.isWalk});
+
+  Map<String, dynamic> toJson() {
+    return {
+      'points': points.map((p) {
+        return {'lat': p.latitude, 'lon': p.longitude};
+      }).toList(),
+      'isWalk': isWalk,
+    };
+  }
+
+  factory RouteSegment.fromJson(Map<String, dynamic> json) {
+    final ptsList = json['points'] as List? ?? [];
+    final decodedPoints = ptsList.map((p) {
+      return LatLng((p['lat'] as num).toDouble(), (p['lon'] as num).toDouble());
+    }).toList();
+
+    return RouteSegment(points: decodedPoints, isWalk: json['isWalk'] ?? false);
+  }
 }
 
 class RouteOption {
@@ -172,26 +191,45 @@ class RouteOption {
     this.walkDistances = const [],
   });
 
-  Map<String, dynamic> toJson() => {
-    'leaveHomeTime': leaveHomeTime.millisecondsSinceEpoch,
-    'arrivalTime': arrivalTime.millisecondsSinceEpoch,
-    'walkDistances': walkDistances,
-    'busLegs': busLegs.map((l) => l.toJson()).toList(),
-  };
+  Map<String, dynamic> toJson() {
+    return {
+      'leaveHomeTime': leaveHomeTime.millisecondsSinceEpoch,
+      'arrivalTime': arrivalTime.millisecondsSinceEpoch,
+      'walkDistances': walkDistances,
+      'busLegs': busLegs.map((l) {
+        return l.toJson();
+      }).toList(),
+      'segments': segments.map((s) {
+        return s.toJson();
+      }).toList(),
+    };
+  }
 
-  factory RouteOption.fromJson(Map<String, dynamic> json) => RouteOption(
-    leaveHomeTime: DateTime.fromMillisecondsSinceEpoch(
-      json['leaveHomeTime'] ?? 0,
-    ),
-    arrivalTime: DateTime.fromMillisecondsSinceEpoch(json['arrivalTime'] ?? 0),
-    walkDistances: List<double>.from(
-      (json['walkDistances'] as List? ?? []).map((v) => (v as num).toDouble()),
-    ),
-    busLegs: (json['busLegs'] as List? ?? [])
-        .map((l) => BusLeg.fromJson(l as Map<String, dynamic>))
-        .toList(),
-    segments: [],
-  );
+  factory RouteOption.fromJson(Map<String, dynamic> json) {
+    final rawBusLegs = json['busLegs'] as List? ?? [];
+    final rawSegments = json['segments'] as List? ?? [];
+    final rawWalks = json['walkDistances'] as List? ?? [];
+
+    return RouteOption(
+      leaveHomeTime: DateTime.fromMillisecondsSinceEpoch(
+        json['leaveHomeTime'] ?? 0,
+      ),
+      arrivalTime: DateTime.fromMillisecondsSinceEpoch(
+        json['arrivalTime'] ?? 0,
+      ),
+      walkDistances: List<double>.from(
+        rawWalks.map((v) {
+          return (v as num).toDouble();
+        }),
+      ),
+      busLegs: rawBusLegs.map((l) {
+        return BusLeg.fromJson(l as Map<String, dynamic>);
+      }).toList(),
+      segments: rawSegments.map((s) {
+        return RouteSegment.fromJson(s as Map<String, dynamic>);
+      }).toList(),
+    );
+  }
 }
 
 class FavoriteRoute {
@@ -235,7 +273,9 @@ class FavoriteRoute {
 
   String get displayLabel {
     final dest = destinationName;
-    if (startName != null) return '$startName → $dest';
+    if (startName != null) {
+      return '$startName → $dest';
+    }
     return '📍 → $dest';
   }
 }

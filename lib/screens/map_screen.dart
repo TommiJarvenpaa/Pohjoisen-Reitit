@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -36,6 +37,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   bool _isFetchingStops = false;
   String _stopSearchQuery = '';
   final TextEditingController _stopSearchController = TextEditingController();
+  StreamSubscription<geo.Position>? _positionStreamSubscription;
 
   @override
   void initState() {
@@ -45,12 +47,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       setState(() => _stopSearchQuery = _stopSearchController.text);
       _rebuildStopMarkers();
     });
-  }
-
-  @override
-  void dispose() {
-    _stopSearchController.dispose();
-    super.dispose();
   }
 
   void _showSnack(String message) {
@@ -63,6 +59,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         margin: const EdgeInsets.all(12),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _positionStreamSubscription?.cancel(); // Muista sulkea Stream!
+    _stopSearchController.dispose();
+    super.dispose();
   }
 
   Future<void> _determinePosition() async {
@@ -94,26 +97,67 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     try {
+      // 1. Haetaan ensin nopea aloitus-sijainti
       geo.Position position = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
         ),
       );
-      setState(() {
-        _currentLocation = LatLng(position.latitude, position.longitude);
-        _hasRealLocation = true;
-      });
-      _mapController.move(_currentLocation, 14.0);
+      if (mounted) {
+        setState(() {
+          _currentLocation = LatLng(position.latitude, position.longitude);
+          _hasRealLocation = true;
+        });
+        _mapController.move(_currentLocation, 14.0);
+      }
+
+      // 2. KÄYNNISTETÄÄN JATKUVA SEURANTA!
+      _startLocationTracking();
     } catch (e) {
       _showSnack('Virhe sijainnin haussa: $e');
     }
   }
 
-  void _resetToCurrentLocation() {
+  void _startLocationTracking() {
+    // Jos meillä on jo kuuntelija päällä, peruutetaan se ensin
+    if (_positionStreamSubscription != null) {
+      _positionStreamSubscription!.cancel();
+    }
+
+    const locationSettings = geo.LocationSettings(
+      accuracy: geo.LocationAccuracy.high,
+      distanceFilter: 5, // Päivitä vain, jos liikutaan yli 5 metriä
+    );
+
+    _positionStreamSubscription =
+        geo.Geolocator.getPositionStream(
+          locationSettings: locationSettings,
+        ).listen((geo.Position position) {
+          if (mounted) {
+            setState(() {
+              _currentLocation = LatLng(position.latitude, position.longitude);
+              _hasRealLocation = true;
+            });
+          }
+        });
+  }
+
+  Future<void> _resetToCurrentLocation() async {
+    _showSnack('Keskitetään sijaintiin...');
+
+    // Jos seuranta on jostain syystä pois päältä (esim. luvat evättiin aluksi),
+    // yritetään käynnistää se uudelleen.
+    if (!_hasRealLocation) {
+      await _determinePosition();
+    } else {
+      // Jos seuranta on jo päällä, siirretään vain kamera tuoreimpaan sijaintiin.
+      _mapController.move(_currentLocation, 15.0);
+    }
+
+    // Tyhjennetään hakukenttä ja tehdään haku
     ref.read(startLocationProvider.notifier).state = null;
     ref.read(departureTimeProvider.notifier).state = DateTime.now();
-    _mapController.move(_currentLocation, 14.0);
-    _triggerSearch(); // Ei sulje paneelia automaattisesti
+    _triggerSearch();
   }
 
   void _swapLocations() {
@@ -1406,8 +1450,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         backgroundColor: kPrimary,
         foregroundColor: Colors.white,
         elevation: 0,
-        title: Row(
-          children: const [
+        title: const Row(
+          children: [
             Icon(Icons.directions_bus_filled, size: 22, color: Colors.white),
             SizedBox(width: 8),
             Text(
@@ -1422,26 +1466,22 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           ],
         ),
         actions: [
+          // 1. Live-bussit (Tärkeä, pidetään näkyvissä!)
           IconButton(
             icon: Icon(
-              Icons.transfer_within_a_station,
-              color: _showBusStops ? Colors.yellowAccent : Colors.white,
+              liveState.isActive
+                  ? Icons.satellite_alt
+                  : Icons.satellite_alt_outlined,
+              color: liveState.isActive ? Colors.yellowAccent : Colors.white,
             ),
-            tooltip: _showBusStops ? 'Piilota pysäkit' : 'Näytä pysäkit',
-            onPressed: () async {
-              setState(() => _showBusStops = !_showBusStops);
-              if (_showBusStops) {
-                await _fetchNearbyStops();
-              } else {
-                _stopSearchController.clear();
-                setState(() {
-                  _rawStops = [];
-                  _stopMarkers = [];
-                  _stopSearchQuery = '';
-                });
-              }
-            },
+            tooltip: liveState.isActive
+                ? 'Lopeta Live-seuranta'
+                : 'Aloita Live-seuranta',
+            onPressed: () =>
+                ref.read(liveBusProvider.notifier).toggleTracking(),
           ),
+
+          // 2. Hakunappi (Tärkeä, pidetään näkyvissä!)
           IconButton(
             icon: Icon(
               _showSearchPanel ? Icons.search_off : Icons.search,
@@ -1451,10 +1491,62 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             onPressed: () =>
                 setState(() => _showSearchPanel = !_showSearchPanel),
           ),
-          IconButton(
-            icon: const Icon(Icons.tune, color: Colors.white),
-            tooltip: 'Asetukset',
-            onPressed: _showSettingsDialog,
+
+          // 3. Kolmen pisteen valikko (Overflow menu)
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            tooltip: 'Lisää vaihtoehtoja',
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            onSelected: (value) async {
+              if (value == 'stops') {
+                setState(() => _showBusStops = !_showBusStops);
+                if (_showBusStops) {
+                  await _fetchNearbyStops();
+                } else {
+                  _stopSearchController.clear();
+                  setState(() {
+                    _rawStops = [];
+                    _stopMarkers = [];
+                    _stopSearchQuery = '';
+                  });
+                }
+              } else if (value == 'settings') {
+                _showSettingsDialog();
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'stops',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.transfer_within_a_station,
+                      color: _showBusStops ? kPrimary : Colors.grey[700],
+                      size: 20,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      _showBusStops
+                          ? 'Piilota pysäkit kartalta'
+                          : 'Näytä pysäkit kartalla',
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'settings',
+                child: Row(
+                  children: [
+                    Icon(Icons.tune, color: Colors.grey[700], size: 20),
+                    const SizedBox(width: 12),
+                    const Text('Hakuasetukset'),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -1609,19 +1701,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           if (routeState.options.isNotEmpty || routeState.isLoading)
             _buildRouteSheet(),
         ],
-      ),
-      floatingActionButton: Padding(
-        padding: const EdgeInsets.only(bottom: 40.0),
-        child: FloatingActionButton.extended(
-          onPressed: () => ref.read(liveBusProvider.notifier).toggleTracking(),
-          backgroundColor: liveState.isActive ? kDelayed : kLiveBus,
-          foregroundColor: liveState.isActive ? Colors.white : kPrimaryDark,
-          elevation: 4,
-          icon: Icon(
-            liveState.isActive ? Icons.stop_circle : Icons.satellite_alt,
-          ),
-          label: Text(liveState.isActive ? 'Lopeta Live' : 'Aloita Live'),
-        ),
       ),
     );
   }
