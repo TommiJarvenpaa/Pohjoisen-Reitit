@@ -38,6 +38,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   String _stopSearchQuery = '';
   final TextEditingController _stopSearchController = TextEditingController();
   StreamSubscription<geo.Position>? _positionStreamSubscription;
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  bool _isCollapsingSheet = false;
 
   @override
   void initState() {
@@ -65,6 +68,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   void dispose() {
     _positionStreamSubscription?.cancel(); // Muista sulkea Stream!
     _stopSearchController.dispose();
+    _sheetController.dispose();
     super.dispose();
   }
 
@@ -1240,195 +1244,209 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         dest != null && favs.any((f) => f.destinationName == dest.name);
 
     final screenHeight = MediaQuery.of(context).size.height;
-    final bottomPadding = MediaQuery.of(context).padding.bottom;
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
-    final double minVisiblePixels = 65.0 + bottomPadding;
-    final double minSheetSize = (minVisiblePixels / screenHeight).clamp(
-      0.1,
-      0.3,
-    );
+    final double minSheetSize = (45.0 / screenHeight).clamp(0.1, 0.3);
 
     return AnimatedPadding(
       duration: const Duration(milliseconds: 150),
       padding: EdgeInsets.only(bottom: keyboardHeight),
-      child: DraggableScrollableSheet(
-        initialChildSize: 0.38,
-        minChildSize: minSheetSize,
-        maxChildSize: 0.72,
-        snap: true,
-        snapSizes: [minSheetSize, 0.38, 0.72],
-        builder: (context, scrollController) {
-          return Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black26,
-                  blurRadius: 24,
-                  offset: Offset(0, -4),
-                ),
-              ],
-            ),
-            child: ListView(
-              controller: scrollController,
-              padding: EdgeInsets.zero,
-              children: [
-                Center(
-                  child: Container(
-                    margin: const EdgeInsets.only(top: 12, bottom: 4),
-                    width: 44,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[300],
-                      borderRadius: BorderRadius.circular(2),
+      child: NotificationListener<DraggableScrollableNotification>(
+        onNotification: (notification) {
+          if (notification.extent > 0.40 &&
+              _showSearchPanel &&
+              !_isCollapsingSheet) {
+            FocusScope.of(context).unfocus();
+            setState(() {
+              _showSearchPanel = false;
+            });
+          }
+          return false;
+        },
+        child: DraggableScrollableSheet(
+          controller: _sheetController,
+          initialChildSize: minSheetSize,
+          minChildSize: minSheetSize,
+          maxChildSize: 0.72,
+          snap: true,
+          snapSizes: [minSheetSize, 0.38, 0.72],
+          builder: (context, scrollController) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black26,
+                    blurRadius: 24,
+                    offset: Offset(0, -4),
+                  ),
+                ],
+              ),
+              child: ListView(
+                controller: scrollController,
+                padding: EdgeInsets.zero,
+                children: [
+                  Center(
+                    child: Container(
+                      margin: const EdgeInsets.only(top: 12, bottom: 4),
+                      width: 44,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[300],
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 8, 8),
-                  child: Row(
-                    children: [
-                      const Text(
-                        'Reittivaihtoehdot',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF222222),
-                        ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: _showFavoritesSheet,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 8, 8),
+                    child: Row(
+                      children: [
+                        const Text(
+                          'Reittivaihtoehdot',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF222222),
                           ),
-                          decoration: BoxDecoration(
-                            color: favs.isNotEmpty
-                                ? kAccent.withValues(alpha: 0.15)
-                                : kSurface,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
+                        ),
+                        const Spacer(),
+                        GestureDetector(
+                          onTap: _showFavoritesSheet,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
+                            ),
+                            decoration: BoxDecoration(
                               color: favs.isNotEmpty
-                                  ? kAccent.withValues(alpha: 0.5)
-                                  : Colors.transparent,
+                                  ? kAccent.withValues(alpha: 0.15)
+                                  : kSurface,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: favs.isNotEmpty
+                                    ? kAccent.withValues(alpha: 0.5)
+                                    : Colors.transparent,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.star_rounded,
+                                  size: 16,
+                                  color: favs.isNotEmpty
+                                      ? kAccent
+                                      : Colors.grey,
+                                ),
+                                if (favs.isNotEmpty) ...[
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '${favs.length}',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF996600),
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.star_rounded,
-                                size: 16,
-                                color: favs.isNotEmpty ? kAccent : Colors.grey,
-                              ),
-                              if (favs.isNotEmpty) ...[
-                                const SizedBox(width: 4),
+                        ),
+                        const SizedBox(width: 8),
+                        if (state.isOffline)
+                          Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.wifi_off,
+                                  size: 12,
+                                  color: Colors.orange,
+                                ),
+                                SizedBox(width: 4),
                                 Text(
-                                  '${favs.length}',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF996600),
+                                  'Offline',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.orange,
                                   ),
                                 ),
                               ],
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      if (state.isOffline)
-                        Container(
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.orange.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.wifi_off,
-                                size: 12,
-                                color: Colors.orange,
-                              ),
-                              SizedBox(width: 4),
-                              Text(
-                                'Offline',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.orange,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      if (state.options.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: kPrimary.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${state.options.length} kpl',
-                            style: const TextStyle(
-                              color: kPrimary,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12,
                             ),
                           ),
-                        ),
-                    ],
-                  ),
-                ),
-                if (state.isLoading)
-                  for (int i = 0; i < 3; i++) const ShimmerCard(),
-                if (!state.isLoading)
-                  for (int i = 0; i < state.options.length; i++)
-                    RouteCard(
-                      option: state.options[i],
-                      isSelected: state.selectedIndex == i,
-                      isFavorite: isFav,
-                      isOfflineData: state.isOffline,
-                      formatTime: _formatTime,
-                      onTap: () {
-                        ref.read(routeStateProvider.notifier).selectRoute(i);
-                        _zoomToRoute(state.options, i);
-                      },
-                      onToggleFavorite: () {
-                        if (dest != null) {
-                          ref
-                              .read(favoritesProvider.notifier)
-                              .toggleFavorite(
-                                dest,
-                                ref.read(startLocationProvider),
-                              );
-                        }
-                      },
-                      onShare: () => _shareRoute(state.options[i]),
+                        if (state.options.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: kPrimary.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${state.options.length} kpl',
+                              style: const TextStyle(
+                                color: kPrimary,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                SizedBox(height: 24 + MediaQuery.of(context).padding.bottom),
-              ],
-            ),
-          );
-        },
+                  ),
+                  if (state.isLoading)
+                    for (int i = 0; i < 3; i++) const ShimmerCard(),
+                  if (!state.isLoading)
+                    for (int i = 0; i < state.options.length; i++)
+                      RouteCard(
+                        option: state.options[i],
+                        isSelected: state.selectedIndex == i,
+                        isFavorite: isFav,
+                        isOfflineData: state.isOffline,
+                        formatTime: _formatTime,
+                        onTap: () {
+                          ref.read(routeStateProvider.notifier).selectRoute(i);
+                          _zoomToRoute(state.options, i);
+                        },
+                        onToggleFavorite: () {
+                          if (dest != null) {
+                            ref
+                                .read(favoritesProvider.notifier)
+                                .toggleFavorite(
+                                  dest,
+                                  ref.read(startLocationProvider),
+                                );
+                          }
+                        },
+                        onShare: () => _shareRoute(state.options[i]),
+                      ),
+                  SizedBox(height: 24),
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final double minSheetSize = (45.0 / screenHeight).clamp(0.1, 0.3);
+
     final routeState = ref.watch(routeStateProvider);
     final liveState = ref.watch(liveBusProvider);
     final startLoc = ref.watch(startLocationProvider);
@@ -1443,264 +1461,313 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       routeState,
     );
 
-    return Scaffold(
-      resizeToAvoidBottomInset: true,
-      appBar: AppBar(
-        toolbarHeight: 52,
-        backgroundColor: kPrimary,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        title: const Row(
-          children: [
-            Icon(Icons.directions_bus_filled, size: 22, color: Colors.white),
-            SizedBox(width: 8),
-            Text(
-              'Pohjoisen Reitit',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 20,
-                letterSpacing: 0.3,
+    final List<Marker> mainMarkers = [
+      Marker(
+        point: _currentLocation,
+        width: 42,
+        height: 42,
+        child: Container(
+          decoration: BoxDecoration(
+            color: _hasRealLocation ? kBus : Colors.green,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: [
+              BoxShadow(
+                color: (_hasRealLocation ? kBus : Colors.green).withValues(
+                  alpha: 0.35,
+                ),
+                blurRadius: 8,
+                spreadRadius: 2,
               ),
+            ],
+          ),
+          child: Icon(
+            _hasRealLocation
+                ? Icons.person_pin_circle
+                : Icons.location_searching,
+            color: Colors.white,
+            size: 20,
+          ),
+        ),
+      ),
+    ];
+
+    if (startLoc != null) {
+      mainMarkers.add(
+        Marker(
+          point: LatLng(startLoc.lat, startLoc.lon),
+          width: 42,
+          height: 42,
+          child: const StartMarker(),
+        ),
+      );
+    }
+
+    if (destLoc != null) {
+      mainMarkers.add(
+        Marker(
+          point: LatLng(destLoc.lat, destLoc.lon),
+          width: 42,
+          height: 52,
+          child: const DestinationMarker(),
+        ),
+      );
+    }
+
+    final List<Widget> mapChildren = [
+      TileLayer(
+        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        userAgentPackageName: 'com.example.pohjoisen_reitit',
+      ),
+      PolylineLayer(
+        polylines: [
+          for (final segment in currentSegments)
+            Polyline(
+              points: segment.points,
+              strokeWidth: segment.isWalk ? 3.5 : 5.5,
+              color: segment.isWalk
+                  ? kWalk.withValues(alpha: 0.8)
+                  : kBus.withValues(alpha: 0.85),
+              pattern: segment.isWalk
+                  ? StrokePattern.dashed(segments: [10, 7])
+                  : const StrokePattern.solid(),
+            ),
+        ],
+      ),
+    ];
+
+    if (_showBusStops && _stopMarkers.isNotEmpty) {
+      mapChildren.add(MarkerLayer(markers: _stopMarkers));
+    }
+
+    if (routeStopMarkers.isNotEmpty) {
+      mapChildren.add(MarkerLayer(markers: routeStopMarkers));
+    }
+
+    if (liveState.isActive && mapLiveMarkers.isNotEmpty) {
+      mapChildren.add(MarkerLayer(markers: mapLiveMarkers));
+    }
+
+    mapChildren.add(MarkerLayer(markers: mainMarkers));
+
+    final List<Widget> stackChildren = [
+      FlutterMap(
+        mapController: _mapController,
+        options: MapOptions(
+          initialCenter: _currentLocation,
+          initialZoom: 13.0,
+          onTap: (tapPosition, point) {
+            if (_isSelectingStart) {
+              setState(() => _isSelectingStart = false);
+              ref.read(startLocationProvider.notifier).state = Place(
+                name: '📍 Valittu kartalta',
+                lat: point.latitude,
+                lon: point.longitude,
+              );
+              _showSnack('Lähtöpiste asetettu kartalta!');
+              _triggerSearch();
+            }
+          },
+          onMapEvent: (event) {
+            if (_showBusStops && event is MapEventMoveEnd) {
+              _fetchNearbyStops();
+            }
+          },
+        ),
+        children: mapChildren,
+      ),
+      Positioned(top: 12, left: 12, right: 12, child: _buildSearchPanel()),
+    ];
+
+    if (_showBusStops) {
+      stackChildren.add(
+        Positioned(
+          bottom: (routeState.options.isNotEmpty || routeState.isLoading)
+              ? 270
+              : 80,
+          left: 16,
+          right: 80,
+          child: _buildStopSearchOverlay(),
+        ),
+      );
+    }
+
+    if (_isSelectingStart) {
+      stackChildren.add(
+        Positioned(
+          top: _showSearchPanel ? 210 : 16,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              decoration: BoxDecoration(
+                color: kWalk,
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: kWalk.withValues(alpha: 0.4),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.touch_app, color: Colors.white, size: 18),
+                  SizedBox(width: 8),
+                  Text(
+                    'Napauta kartalta lähtöpiste',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (routeState.options.isNotEmpty || routeState.isLoading) {
+      stackChildren.add(_buildRouteSheet());
+    }
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        systemNavigationBarColor: Colors.white,
+        systemNavigationBarDividerColor:
+            Colors.transparent, // Poistaa mahdollisen harmaan rajan
+        systemNavigationBarIconBrightness: Brightness.dark,
+      ),
+      child: Scaffold(
+        backgroundColor: Colors
+            .white, // TÄMÄ tekee navigaatiopalkin takana olevasta tilasta valkoisen
+        resizeToAvoidBottomInset: true,
+        appBar: AppBar(
+          toolbarHeight: 52,
+          backgroundColor: kPrimary,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          title: const Row(
+            children: [
+              Icon(Icons.directions_bus_filled, size: 22, color: Colors.white),
+              SizedBox(width: 8),
+              Text(
+                'Pohjoisen Reitit',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 20,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: Icon(
+                liveState.isActive
+                    ? Icons.satellite_alt
+                    : Icons.satellite_alt_outlined,
+                color: liveState.isActive ? Colors.yellowAccent : Colors.white,
+              ),
+              tooltip: liveState.isActive
+                  ? 'Lopeta Live-seuranta'
+                  : 'Aloita Live-seuranta',
+              onPressed: () =>
+                  ref.read(liveBusProvider.notifier).toggleTracking(),
+            ),
+            IconButton(
+              icon: Icon(
+                _showSearchPanel ? Icons.search_off : Icons.search,
+                color: Colors.white,
+              ),
+              tooltip: _showSearchPanel ? 'Piilota haku' : 'Näytä haku',
+              onPressed: () {
+                final show = !_showSearchPanel;
+                setState(() => _showSearchPanel = show);
+                if (show && _sheetController.isAttached) {
+                  _isCollapsingSheet = true;
+                  _sheetController
+                      .animateTo(
+                        minSheetSize,
+                        duration: const Duration(milliseconds: 280),
+                        curve: Curves.easeInOut,
+                      )
+                      .whenComplete(() => _isCollapsingSheet = false);
+                }
+              },
+            ),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert, color: Colors.white),
+              tooltip: 'Lisää vaihtoehtoja',
+              color: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              onSelected: (value) async {
+                if (value == 'stops') {
+                  setState(() => _showBusStops = !_showBusStops);
+                  if (_showBusStops) {
+                    await _fetchNearbyStops();
+                  } else {
+                    _stopSearchController.clear();
+                    setState(() {
+                      _rawStops = [];
+                      _stopMarkers = [];
+                      _stopSearchQuery = '';
+                    });
+                  }
+                } else if (value == 'settings') {
+                  _showSettingsDialog();
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'stops',
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.transfer_within_a_station,
+                        color: _showBusStops ? kPrimary : Colors.grey[700],
+                        size: 20,
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        _showBusStops
+                            ? 'Piilota pysäkit kartalta'
+                            : 'Näytä pysäkit kartalla',
+                      ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'settings',
+                  child: Row(
+                    children: [
+                      Icon(Icons.tune, color: Colors.grey[700], size: 20),
+                      const SizedBox(width: 12),
+                      const Text('Hakuasetukset'),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        actions: [
-          // 1. Live-bussit (Tärkeä, pidetään näkyvissä!)
-          IconButton(
-            icon: Icon(
-              liveState.isActive
-                  ? Icons.satellite_alt
-                  : Icons.satellite_alt_outlined,
-              color: liveState.isActive ? Colors.yellowAccent : Colors.white,
-            ),
-            tooltip: liveState.isActive
-                ? 'Lopeta Live-seuranta'
-                : 'Aloita Live-seuranta',
-            onPressed: () =>
-                ref.read(liveBusProvider.notifier).toggleTracking(),
-          ),
-
-          // 2. Hakunappi (Tärkeä, pidetään näkyvissä!)
-          IconButton(
-            icon: Icon(
-              _showSearchPanel ? Icons.search_off : Icons.search,
-              color: Colors.white,
-            ),
-            tooltip: _showSearchPanel ? 'Piilota haku' : 'Näytä haku',
-            onPressed: () =>
-                setState(() => _showSearchPanel = !_showSearchPanel),
-          ),
-
-          // 3. Kolmen pisteen valikko (Overflow menu)
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
-            tooltip: 'Lisää vaihtoehtoja',
-            color: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            onSelected: (value) async {
-              if (value == 'stops') {
-                setState(() => _showBusStops = !_showBusStops);
-                if (_showBusStops) {
-                  await _fetchNearbyStops();
-                } else {
-                  _stopSearchController.clear();
-                  setState(() {
-                    _rawStops = [];
-                    _stopMarkers = [];
-                    _stopSearchQuery = '';
-                  });
-                }
-              } else if (value == 'settings') {
-                _showSettingsDialog();
-              }
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'stops',
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.transfer_within_a_station,
-                      color: _showBusStops ? kPrimary : Colors.grey[700],
-                      size: 20,
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      _showBusStops
-                          ? 'Piilota pysäkit kartalta'
-                          : 'Näytä pysäkit kartalla',
-                    ),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'settings',
-                child: Row(
-                  children: [
-                    Icon(Icons.tune, color: Colors.grey[700], size: 20),
-                    const SizedBox(width: 12),
-                    const Text('Hakuasetukset'),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _currentLocation,
-              initialZoom: 13.0,
-              onTap: (tapPosition, point) {
-                if (_isSelectingStart) {
-                  setState(() => _isSelectingStart = false);
-                  ref.read(startLocationProvider.notifier).state = Place(
-                    name: '📍 Valittu kartalta',
-                    lat: point.latitude,
-                    lon: point.longitude,
-                  );
-                  _showSnack('Lähtöpiste asetettu kartalta!');
-                  _triggerSearch(); // Kartalta valinta tekee haun taustalla jättäen paneelin auki
-                }
-              },
-              onMapEvent: (event) {
-                if (_showBusStops && event is MapEventMoveEnd) {
-                  _fetchNearbyStops();
-                }
-              },
-            ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.pohjoisen_reitit',
-              ),
-              PolylineLayer(
-                polylines: [
-                  for (final segment in currentSegments)
-                    Polyline(
-                      points: segment.points,
-                      strokeWidth: segment.isWalk ? 3.5 : 5.5,
-                      color: segment.isWalk
-                          ? kWalk.withValues(alpha: 0.8)
-                          : kBus.withValues(alpha: 0.85),
-                      pattern: segment.isWalk
-                          ? StrokePattern.dashed(segments: [10, 7])
-                          : const StrokePattern.solid(),
-                    ),
-                ],
-              ),
-              if (_showBusStops && _stopMarkers.isNotEmpty)
-                MarkerLayer(markers: _stopMarkers),
-              if (routeStopMarkers.isNotEmpty)
-                MarkerLayer(markers: routeStopMarkers),
-              if (liveState.isActive && mapLiveMarkers.isNotEmpty)
-                MarkerLayer(markers: mapLiveMarkers),
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: _currentLocation,
-                    width: 42,
-                    height: 42,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: _hasRealLocation ? kBus : Colors.green,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 3),
-                        boxShadow: [
-                          BoxShadow(
-                            color: (_hasRealLocation ? kBus : Colors.green)
-                                .withValues(alpha: 0.35),
-                            blurRadius: 8,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                      child: Icon(
-                        _hasRealLocation
-                            ? Icons.person_pin_circle
-                            : Icons.location_searching,
-                        color: Colors.white,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                  if (startLoc != null)
-                    Marker(
-                      point: LatLng(startLoc.lat, startLoc.lon),
-                      width: 42,
-                      height: 42,
-                      child: const StartMarker(),
-                    ),
-                  if (destLoc != null)
-                    Marker(
-                      point: LatLng(destLoc.lat, destLoc.lon),
-                      width: 42,
-                      height: 52,
-                      child: const DestinationMarker(),
-                    ),
-                ],
-              ),
-            ],
-          ),
-          Positioned(top: 12, left: 12, right: 12, child: _buildSearchPanel()),
-          if (_showBusStops)
-            Positioned(
-              bottom: (routeState.options.isNotEmpty || routeState.isLoading)
-                  ? 270
-                  : 80,
-              left: 16,
-              right: 80,
-              child: _buildStopSearchOverlay(),
-            ),
-          if (_isSelectingStart)
-            Positioned(
-              top: _showSearchPanel ? 210 : 16,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: kWalk,
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: [
-                      BoxShadow(
-                        color: kWalk.withValues(alpha: 0.4),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.touch_app, color: Colors.white, size: 18),
-                      SizedBox(width: 8),
-                      Text(
-                        'Napauta kartalta lähtöpiste',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          if (routeState.options.isNotEmpty || routeState.isLoading)
-            _buildRouteSheet(),
-        ],
+        body: SafeArea(
+          // TÄMÄ estää karttaa valumasta navigaatiopalkin alle
+          bottom: true,
+          top: false,
+          left: false,
+          right: false,
+          child: Stack(children: stackChildren),
+        ),
       ),
     );
   }

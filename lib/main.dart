@@ -2,12 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter/services.dart'; // Lisätty SystemChromea varten
 import 'theme/app_colors.dart';
 import 'screens/map_screen.dart'; // Tämän luomme seuraavassa viestissä
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: ".env");
+
+  // Asetetaan Androidin navigaatiopalkki valkoiseksi ja sen ikonit tummiksi
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      systemNavigationBarColor: Colors.white,
+      systemNavigationBarIconBrightness: Brightness.dark,
+    ),
+  );
+
   // Riverpod vaatii ProviderScope-käärimisen juureen
   runApp(const ProviderScope(child: PohjoisenReitit()));
 }
