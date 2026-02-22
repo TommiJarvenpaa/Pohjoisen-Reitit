@@ -138,6 +138,7 @@ class TransitService {
           startTime endTime
           legs {
             mode startTime endTime distance
+            interlineWithPreviousLeg
             route { shortName gtfsId alerts { alertHeaderText } }
             from { name lat lon stop { gtfsId } }
             to { name lat lon }
@@ -210,7 +211,7 @@ class TransitService {
       List<BusLeg> busLegs = [];
       List<double> walkDistances = [];
 
-      double currentWalk = 0.0; // Kerätään kävelymatkaa väliaikaisesti
+      double currentWalk = 0.0;
 
       for (var leg in itinerary['legs']) {
         if (leg['mode'] == 'WALK') {
@@ -218,10 +219,8 @@ class TransitService {
         }
 
         if (leg['mode'] == 'BUS') {
-          // Kun bussi alkaa, tallennetaan sitä edeltävä kävely (voi olla 0)
           walkDistances.add(currentWalk);
-          currentWalk =
-              0.0; // Nollataan odottamaan seuraavaa vaihtoa tai loppukävelyä
+          currentWalk = 0.0;
 
           String stopId = leg['from']?['stop']?['gtfsId'] ?? '';
           DateTime scheduledDep = DateTime.fromMillisecondsSinceEpoch(
@@ -231,6 +230,9 @@ class TransitService {
           double? fromLon = (leg['from']?['lon'] as num?)?.toDouble();
           double? toLat = (leg['to']?['lat'] as num?)?.toDouble();
           double? toLon = (leg['to']?['lon'] as num?)?.toDouble();
+
+          // <-- UUSI: Luetaan interline-tieto
+          bool stayOnBus = leg['interlineWithPreviousLeg'] ?? false;
 
           List<IntermediateStop> intermediateStops = [];
           final rawStops = leg['intermediateStops'] as List<dynamic>?;
@@ -275,6 +277,7 @@ class TransitService {
               realtimeDeparture: scheduledDep,
               realtimeState: 'SCHEDULED',
               isRealtime: false,
+              stayOnBus: stayOnBus, // <-- UUSI: Talletetaan tieto BusLegiin
               intermediateStops: intermediateStops,
               alerts: alerts,
             ),
@@ -296,7 +299,6 @@ class TransitService {
         }
       }
 
-      // Lisätään viimeisen bussin jälkeinen kävely (tai koko matkan kävely, jos pelkkä kävely)
       walkDistances.add(currentWalk);
 
       parsedOptions.add(
@@ -447,6 +449,7 @@ class TransitService {
                         realtimeDeparture: legRealDep,
                         realtimeState: state,
                         isRealtime: isRt,
+                        stayOnBus: baseLeg.stayOnBus,
                         intermediateStops: baseLeg.intermediateStops,
                         alerts: baseLeg.alerts,
                       ),

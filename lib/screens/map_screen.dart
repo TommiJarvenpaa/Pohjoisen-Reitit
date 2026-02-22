@@ -113,7 +113,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     ref.read(startLocationProvider.notifier).state = null;
     ref.read(departureTimeProvider.notifier).state = DateTime.now();
     _mapController.move(_currentLocation, 14.0);
-    _triggerSearch();
+    _triggerSearch(); // Ei sulje paneelia automaattisesti
   }
 
   void _swapLocations() {
@@ -121,15 +121,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final dest = ref.read(destinationLocationProvider);
     ref.read(startLocationProvider.notifier).state = dest;
     ref.read(destinationLocationProvider.notifier).state = start;
-    _triggerSearch();
+    _triggerSearch(); // Ei sulje paneelia automaattisesti
   }
 
-  void _triggerSearch() {
+  // UUSI LOGIIKKA TÄSSÄ: closePanel-parametri (oletuksena false)
+  void _triggerSearch({bool closePanel = false}) {
     final dest = ref.read(destinationLocationProvider);
     if (dest == null) return;
 
-    FocusScope.of(context).unfocus();
-    setState(() => _showSearchPanel = false);
+    if (closePanel) {
+      FocusScope.of(context).unfocus();
+      setState(() => _showSearchPanel = false);
+    }
 
     final start = ref.read(startLocationProvider);
     final time = ref.read(departureTimeProvider);
@@ -280,7 +283,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   lat: (stop['lat'] as num).toDouble(),
                   lon: (stop['lon'] as num).toDouble(),
                 );
-                _triggerSearch();
+                _triggerSearch(
+                  closePanel: true,
+                ); // Sulkee paneelin, jotta nähdään tulokset
               },
             ),
             ListTile(
@@ -293,7 +298,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   lat: (stop['lat'] as num).toDouble(),
                   lon: (stop['lon'] as num).toDouble(),
                 );
-                _triggerSearch();
+                _triggerSearch(closePanel: true);
               },
             ),
             const SizedBox(height: 8),
@@ -333,7 +338,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               lat: stopLat,
               lon: stopLon,
             );
-            _triggerSearch();
+            _triggerSearch(closePanel: true);
           },
           onSetAsDestination: () {
             Navigator.pop(ctx);
@@ -342,7 +347,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               lat: stopLat,
               lon: stopLon,
             );
-            _triggerSearch();
+            _triggerSearch(closePanel: true);
           },
         ),
       ),
@@ -410,7 +415,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       pickedTime.hour,
       pickedTime.minute,
     );
-    _triggerSearch();
+    _triggerSearch(); // Ei sulje paneelia
   }
 
   Future<void> _showSettingsDialog() async {
@@ -479,7 +484,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 Navigator.pop(context);
 
                 if (ref.read(destinationLocationProvider) != null) {
-                  _triggerSearch();
+                  _triggerSearch(); // Ei sulje hakupaneelia, jos se on auki
                 }
               },
               child: const Text('Tallenna'),
@@ -725,7 +730,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               lon: fav.startLon!,
                             );
                           }
-                          _triggerSearch();
+                          _triggerSearch(
+                            closePanel: true,
+                          ); // Suljetaan paneeli jotta reitti näkyy selvästi!
                         },
                       );
                     },
@@ -794,7 +801,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                     .where((o) => o.name != option.name)
                                     .take(4),
                               ];
-                              _triggerSearch();
+                              _triggerSearch(); // Ei sulje paneelia!
                             },
                             fieldViewBuilder:
                                 (ctx, controller, focusNode, onFieldSubmitted) {
@@ -920,7 +927,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                     .where((o) => o.name != option.name)
                                     .take(4),
                               ];
-                              _triggerSearch();
+                              _triggerSearch(); // Ei sulje paneelia!
                             },
                             fieldViewBuilder:
                                 (ctx, controller, focusNode, onFieldSubmitted) {
@@ -961,6 +968,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                   ),
                                 ),
                               )
+                            // SUURENNUSLASI: Tämä on ainoa nappi hakupaneelissa, joka pakottaa paneelin kiinni!
                             : IconButton(
                                 icon: const Icon(
                                   Icons.search,
@@ -968,7 +976,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                   size: 22,
                                 ),
                                 visualDensity: VisualDensity.compact,
-                                onPressed: _triggerSearch,
+                                onPressed: () =>
+                                    _triggerSearch(closePanel: true),
                               ),
                       ],
                     ),
@@ -1445,7 +1454,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           IconButton(
             icon: const Icon(Icons.tune, color: Colors.white),
             tooltip: 'Asetukset',
-            onPressed: _showSettingsDialog, // Asetusvalikko avautuu nyt tästä
+            onPressed: _showSettingsDialog,
           ),
         ],
       ),
@@ -1465,7 +1474,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     lon: point.longitude,
                   );
                   _showSnack('Lähtöpiste asetettu kartalta!');
-                  _triggerSearch();
+                  _triggerSearch(); // Kartalta valinta tekee haun taustalla jättäen paneelin auki
                 }
               },
               onMapEvent: (event) {

@@ -64,8 +64,37 @@ class RouteCard extends StatelessWidget {
         BusLegSection(leg: option.busLegs[i], formatTime: formatTime),
       );
 
-      // 3. Jokaisen bussimatkan JÄLKEEN tuleva kävely (vaihto tai loppukävely kohteeseen)
-      if (i + 1 < option.walkDistances.length) {
+      // 3. Jokaisen bussimatkan JÄLKEEN tapahtuva asia:
+
+      // Tarkistetaan ensin, jatkuuko matka SUORAAN samalla bussilla
+      if (i + 1 < option.busLegs.length && option.busLegs[i + 1].stayOnBus) {
+        timelineWidgets.add(const TimelineDivider());
+        timelineWidgets.add(
+          const Padding(
+            padding: EdgeInsets.only(left: 28, bottom: 4),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.airline_seat_recline_normal,
+                  size: 14,
+                  color: Colors.orange,
+                ),
+                SizedBox(width: 6),
+                Text(
+                  'Pysy bussissa, linja vaihtuu',
+                  style: TextStyle(
+                    color: Colors.orange,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+      // Jos ei pysytä bussissa, katsotaan onko normaalia kävelyä (vaihto tai loppukävely)
+      else if (i + 1 < option.walkDistances.length) {
         double nextWalk = option.walkDistances[i + 1];
         if (nextWalk > 0) {
           timelineWidgets.add(const TimelineDivider());

@@ -78,6 +78,7 @@ class BusLeg {
   final DateTime realtimeDeparture;
   final String realtimeState;
   final bool isRealtime;
+  final bool stayOnBus;
   final List<IntermediateStop> intermediateStops;
   final List<AlertInfo> alerts;
 
@@ -96,6 +97,7 @@ class BusLeg {
     required this.realtimeDeparture,
     required this.realtimeState,
     required this.isRealtime,
+    this.stayOnBus = false,
     this.intermediateStops = const [],
     this.alerts = const [],
   });
@@ -115,6 +117,7 @@ class BusLeg {
     'realtimeDeparture': realtimeDeparture.millisecondsSinceEpoch,
     'realtimeState': realtimeState,
     'isRealtime': isRealtime,
+    'stayOnBus': stayOnBus,
     'intermediateStops': intermediateStops.map((s) => s.toJson()).toList(),
     'alerts': alerts.map((a) => a.text).toList(),
   };
@@ -138,6 +141,7 @@ class BusLeg {
     ),
     realtimeState: json['realtimeState'] ?? 'SCHEDULED',
     isRealtime: json['isRealtime'] ?? false,
+    stayOnBus: json['stayOnBus'] ?? false,
     intermediateStops: (json['intermediateStops'] as List? ?? [])
         .map((s) => IntermediateStop.fromJson(s as Map<String, dynamic>))
         .toList(),
