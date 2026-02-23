@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
 import '../theme/app_colors.dart';
 
 class StartMarker extends StatelessWidget {
@@ -162,56 +163,57 @@ class IntermediateStopDot extends StatelessWidget {
 
 class LiveBusMarker extends StatelessWidget {
   final String busNumber;
-  const LiveBusMarker(this.busNumber, {super.key});
+  final double bearing;
+
+  const LiveBusMarker(this.busNumber, {super.key, this.bearing = 0.0});
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-          decoration: BoxDecoration(
-            color: kLiveBus,
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: kLiveBus.withValues(alpha: 0.45),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Text(
-            busNumber,
-            style: const TextStyle(
-              color: kPrimaryDark,
-              fontWeight: FontWeight.bold,
-              fontSize: 10,
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: Stack(
+        clipBehavior: Clip.none, // Sallii nuolen piirtyä laatikon ulkopuolelle
+        alignment: Alignment.center,
+        children: [
+          // 1. Pyörivä suuntanuoli pallon ulkokehällä
+          Transform.rotate(
+            angle: bearing * (math.pi / 180),
+            child: Transform.translate(
+              offset: const Offset(0, -21),
+              child: const Icon(Icons.navigation, color: Colors.red, size: 14),
             ),
           ),
-        ),
-        Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: kLiveBus,
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 2.5),
-            boxShadow: [
-              BoxShadow(
-                color: kLiveBus.withValues(alpha: 0.4),
-                blurRadius: 8,
-                spreadRadius: 2,
+          // 2. Bussipallero, jonka SISÄLLÄ on nyt vuoronumero
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: kLiveBus,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2.5),
+              boxShadow: [
+                BoxShadow(
+                  color: kLiveBus.withValues(alpha: 0.4),
+                  blurRadius: 8,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Center(
+              child: Text(
+                busNumber,
+                style: const TextStyle(
+                  color: kPrimaryDark,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12, // Sopiva koko, jotta numerot mahtuvat palloon
+                ),
+                textAlign: TextAlign.center,
               ),
-            ],
+            ),
           ),
-          child: const Icon(
-            Icons.directions_bus,
-            color: kPrimaryDark,
-            size: 18,
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

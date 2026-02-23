@@ -586,7 +586,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     LiveBusState liveState,
     RouteState routeState,
   ) {
-    if (liveState.feed == null || !liveState.isActive) return [];
+    if (liveState.feed == null || !liveState.isActive) {
+      return [];
+    }
 
     final Set<String> activeRouteIds = {};
     final Set<String> activeBusNumbers = {};
@@ -595,16 +597,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       for (var leg in routeState.options[routeState.selectedIndex].busLegs) {
         activeBusNumbers.add(leg.busNumber);
         String rId = leg.routeGtfsId;
-        if (rId.contains(':')) rId = rId.split(':').last;
-        if (rId.isNotEmpty) activeRouteIds.add(rId);
+        if (rId.contains(':')) {
+          rId = rId.split(':').last;
+        }
+        if (rId.isNotEmpty) {
+          activeRouteIds.add(rId);
+        }
       }
     }
 
     List<Marker> markers = [];
     for (var entity in liveState.feed!.entity) {
-      if (!entity.hasVehicle()) continue;
+      if (!entity.hasVehicle()) {
+        continue;
+      }
       final vehicle = entity.vehicle;
-      if (!vehicle.hasPosition() || !vehicle.hasTrip()) continue;
+      if (!vehicle.hasPosition() || !vehicle.hasTrip()) {
+        continue;
+      }
 
       final routeId = vehicle.trip.routeId;
       final pos = vehicle.position;
@@ -620,7 +630,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 routeId == busNum,
           );
 
-      if (!matches) continue;
+      if (!matches) {
+        continue;
+      }
 
       String displayNumber = routeId;
       if (routeState.options.isNotEmpty) {
@@ -636,16 +648,26 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           }
         }
       } else {
-        if (routeId.contains(':')) displayNumber = routeId.split(':').last;
-        if (routeId.contains('_')) displayNumber = routeId.split('_').last;
+        if (routeId.contains(':')) {
+          displayNumber = routeId.split(':').last;
+        }
+        if (routeId.contains('_')) {
+          displayNumber = routeId.split('_').last;
+        }
+      }
+
+      double busDirection = 0.0;
+      if (pos.hasBearing()) {
+        busDirection = pos.bearing.toDouble();
       }
 
       markers.add(
         Marker(
           point: LatLng(pos.latitude, pos.longitude),
-          width: 42,
-          height: 52,
-          child: LiveBusMarker(displayNumber),
+          width: 42, // Nyt markkeri on symmetrinen!
+          height:
+              42, // Korkeus ja leveys ovat samat, jolloin pallo pysyy täydellisesti keskellä
+          child: LiveBusMarker(displayNumber, bearing: busDirection),
         ),
       );
     }
