@@ -17,8 +17,56 @@ final transitServiceProvider = Provider((ref) {
 });
 
 // Asetukset
-final minTransferTimeProvider = StateProvider<int>((ref) => 120);
-final walkSpeedProvider = StateProvider<double>((ref) => 5.0);
+class MinTransferTimeNotifier extends StateNotifier<int> {
+  MinTransferTimeNotifier() : super(120) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt('min_transfer_time');
+    if (saved != null) {
+      state = saved;
+    }
+  }
+
+  Future<void> set(int value) async {
+    state = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('min_transfer_time', value);
+  }
+}
+
+final minTransferTimeProvider =
+    StateNotifierProvider<MinTransferTimeNotifier, int>((ref) {
+      return MinTransferTimeNotifier();
+    });
+
+class WalkSpeedNotifier extends StateNotifier<double> {
+  WalkSpeedNotifier() : super(5.0) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getDouble('walk_speed_kmh');
+    if (saved != null) {
+      state = saved;
+    }
+  }
+
+  Future<void> set(double value) async {
+    state = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('walk_speed_kmh', value);
+  }
+}
+
+final walkSpeedProvider = StateNotifierProvider<WalkSpeedNotifier, double>((
+  ref,
+) {
+  return WalkSpeedNotifier();
+});
 
 // Historia
 final recentSearchesProvider = StateProvider<List<Place>>((ref) => []);
@@ -107,16 +155,20 @@ class RouteNotifier extends StateNotifier<RouteState> {
   }
 
   Future<void> _loadOfflineCache() async {
-    final prefs = await SharedPreferences.getInstance();
-    final cachedJson = prefs.getString('last_route_options');
-    if (cachedJson != null) {
-      final rawList = json.decode(cachedJson) as List<dynamic>;
-      final options = rawList
-          .map((item) => RouteOption.fromJson(item as Map<String, dynamic>))
-          .toList();
-      if (options.isNotEmpty) {
-        state = state.copyWith(options: options, isOffline: true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedJson = prefs.getString('last_route_options');
+      if (cachedJson != null) {
+        final rawList = json.decode(cachedJson) as List<dynamic>;
+        final options = rawList
+            .map((item) => RouteOption.fromJson(item as Map<String, dynamic>))
+            .toList();
+        if (options.isNotEmpty) {
+          state = state.copyWith(options: options, isOffline: true);
+        }
       }
+    } catch (_) {
+      // Old or corrupt cache format
     }
   }
 
@@ -135,15 +187,25 @@ class RouteNotifier extends StateNotifier<RouteState> {
 // Live seuranta
 class LiveBusState {
   final FeedMessage? feed;
+  final FeedMessage? tripUpdateFeed;
   final bool isActive;
   final bool isFetching;
-  LiveBusState({this.feed, this.isActive = false, this.isFetching = false});
+
+  LiveBusState({
+    this.feed,
+    this.tripUpdateFeed,
+    this.isActive = false,
+    this.isFetching = false,
+  });
+
   LiveBusState copyWith({
     FeedMessage? feed,
+    FeedMessage? tripUpdateFeed,
     bool? isActive,
     bool? isFetching,
   }) => LiveBusState(
     feed: feed ?? this.feed,
+    tripUpdateFeed: tripUpdateFeed ?? this.tripUpdateFeed,
     isActive: isActive ?? this.isActive,
     isFetching: isFetching ?? this.isFetching,
   );
@@ -157,18 +219,33 @@ final liveBusProvider = StateNotifierProvider<LiveBusNotifier, LiveBusState>((
 
 class LiveBusNotifier extends StateNotifier<LiveBusState> {
   final TransitService _api;
-  Timer? _timer;
+  Timer? _positionTimer;
+  Timer? _tripUpdateTimer;
+  bool _isFetchingTripUpdates = false;
 
   LiveBusNotifier(this._api) : super(LiveBusState());
 
   void toggleTracking() {
     if (state.isActive) {
-      _timer?.cancel();
-      state = LiveBusState(isActive: false, feed: null);
+      _positionTimer?.cancel();
+      _tripUpdateTimer?.cancel();
+      state = LiveBusState(isActive: false, feed: null, tripUpdateFeed: null);
     } else {
       state = state.copyWith(isActive: true);
+
+      // Haetaan heti kun laitetaan päälle
       fetchBuses();
-      _timer = Timer.periodic(const Duration(seconds: 15), (_) => fetchBuses());
+      fetchTripUpdates();
+
+      // Sijainnit 3 sekunnin välein
+      _positionTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        fetchBuses();
+      });
+
+      // Pysäkkien viiveet 30 sekunnin välein
+      _tripUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+        fetchTripUpdates();
+      });
     }
   }
 
@@ -179,9 +256,23 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
     if (state.isActive) state = state.copyWith(feed: feed, isFetching: false);
   }
 
+  Future<void> fetchTripUpdates() async {
+    if (_isFetchingTripUpdates) return;
+    _isFetchingTripUpdates = true;
+    try {
+      final tripFeed = await _api.fetchTripUpdates();
+      if (state.isActive) {
+        state = state.copyWith(tripUpdateFeed: tripFeed);
+      }
+    } finally {
+      _isFetchingTripUpdates = false;
+    }
+  }
+
   @override
   void dispose() {
-    _timer?.cancel();
+    _positionTimer?.cancel();
+    _tripUpdateTimer?.cancel();
     super.dispose();
   }
 }

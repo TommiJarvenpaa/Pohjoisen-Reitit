@@ -68,6 +68,27 @@ class TransitService {
     return null;
   }
 
+  // UUSI: Funktio TripUpdate-datan hakemiseen
+  Future<FeedMessage?> fetchTripUpdates() async {
+    final String encodedCredentials = base64Encode(
+      utf8.encode('$walttiClientId:$walttiClientSecret'),
+    );
+    try {
+      final response = await http.get(
+        Uri.parse(
+          'https://data.waltti.fi/oulu/api/gtfsrealtime/v1.0/feed/tripupdate',
+        ),
+        headers: {'Authorization': 'Basic $encodedCredentials'},
+      );
+      if (response.statusCode == 200) {
+        return FeedMessage.fromBuffer(response.bodyBytes);
+      }
+    } catch (e) {
+      debugPrint('Trip update fetch error: $e');
+    }
+    return null;
+  }
+
   Future<List<Map<String, dynamic>>> fetchNearbyStops(
     double s,
     double w,
@@ -139,11 +160,12 @@ class TransitService {
           legs {
             mode startTime endTime distance
             interlineWithPreviousLeg
+            trip { gtfsId }
             route { shortName gtfsId alerts { alertHeaderText } }
             from { name lat lon stop { gtfsId } }
-            to { name lat lon }
+            to { name lat lon stop { gtfsId } }
             legGeometry { points }
-            intermediateStops { name lat lon }
+            intermediateStops { name lat lon gtfsId }
           }
         }
       }
@@ -222,7 +244,9 @@ class TransitService {
           walkDistances.add(currentWalk);
           currentWalk = 0.0;
 
-          String stopId = leg['from']?['stop']?['gtfsId'] ?? '';
+          String fromStopId = leg['from']?['stop']?['gtfsId'] ?? '';
+          String toStopId = leg['to']?['stop']?['gtfsId'] ?? '';
+          String tripId = leg['trip']?['gtfsId'] ?? '';
           DateTime scheduledDep = DateTime.fromMillisecondsSinceEpoch(
             leg['startTime'],
           );
@@ -231,27 +255,38 @@ class TransitService {
           double? toLat = (leg['to']?['lat'] as num?)?.toDouble();
           double? toLon = (leg['to']?['lon'] as num?)?.toDouble();
 
-          // <-- UUSI: Luetaan interline-tieto
           bool stayOnBus = leg['interlineWithPreviousLeg'] ?? false;
 
           List<IntermediateStop> intermediateStops = [];
+          List<String> legStopIds = [fromStopId];
           final rawStops = leg['intermediateStops'] as List<dynamic>?;
+
           if (rawStops != null) {
             for (var s in rawStops) {
               if (s['lat'] != null && s['lon'] != null) {
+                String? stopGtfsId = s['gtfsId'] as String?;
+                if (stopGtfsId != null && stopGtfsId.isNotEmpty) {
+                  legStopIds.add(stopGtfsId);
+                }
                 intermediateStops.add(
                   IntermediateStop(
                     name: s['name'] ?? '',
                     lat: (s['lat'] as num).toDouble(),
                     lon: (s['lon'] as num).toDouble(),
+                    gtfsId: stopGtfsId,
                   ),
                 );
               }
             }
           }
 
+          if (toStopId.isNotEmpty) {
+            legStopIds.add(toStopId);
+          }
+
           List<AlertInfo> alerts = [];
           final rawAlerts = leg['route']?['alerts'] as List<dynamic>?;
+
           if (rawAlerts != null) {
             for (var a in rawAlerts) {
               final text = a['alertHeaderText'];
@@ -265,8 +300,11 @@ class TransitService {
             BusLeg(
               busNumber: leg['route']['shortName'] ?? 'Bussi',
               routeGtfsId: leg['route']['gtfsId'] ?? '',
+              tripId: tripId,
               fromStop: leg['from']['name'] ?? 'Tuntematon pysäkki',
-              fromStopId: stopId,
+              fromStopId: fromStopId,
+              toStopId: toStopId,
+              legStopIds: legStopIds,
               fromLat: fromLat,
               fromLon: fromLon,
               toStop: leg['to']['name'] ?? 'Tuntematon pysäkki',
@@ -277,7 +315,7 @@ class TransitService {
               realtimeDeparture: scheduledDep,
               realtimeState: 'SCHEDULED',
               isRealtime: false,
-              stayOnBus: stayOnBus, // <-- UUSI: Talletetaan tieto BusLegiin
+              stayOnBus: stayOnBus,
               intermediateStops: intermediateStops,
               alerts: alerts,
             ),
@@ -437,8 +475,11 @@ class TransitService {
                       BusLeg(
                         busNumber: baseLeg.busNumber,
                         routeGtfsId: baseLeg.routeGtfsId,
+                        tripId: baseLeg.tripId,
                         fromStop: baseLeg.fromStop,
                         fromStopId: baseLeg.fromStopId,
+                        toStopId: baseLeg.toStopId,
+                        legStopIds: baseLeg.legStopIds,
                         fromLat: baseLeg.fromLat,
                         fromLon: baseLeg.fromLon,
                         toStop: baseLeg.toStop,

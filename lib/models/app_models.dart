@@ -1,5 +1,10 @@
 import 'package:latlong2/latlong.dart';
 
+List<String> _parseStringList(dynamic value) {
+  if (value is! List) return [];
+  return value.map((e) => e?.toString() ?? '').toList();
+}
+
 class Place {
   final String name;
   final double lat;
@@ -32,17 +37,40 @@ class IntermediateStop {
   final String name;
   final double lat;
   final double lon;
+  final String? gtfsId;
 
-  IntermediateStop({required this.name, required this.lat, required this.lon});
+  IntermediateStop({
+    required this.name,
+    required this.lat,
+    required this.lon,
+    this.gtfsId,
+  });
 
-  Map<String, dynamic> toJson() => {'name': name, 'lat': lat, 'lon': lon};
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'lat': lat,
+        'lon': lon,
+        if (gtfsId != null) 'gtfsId': gtfsId,
+      };
 
-  factory IntermediateStop.fromJson(Map<String, dynamic> json) =>
-      IntermediateStop(
+  factory IntermediateStop.fromJson(Map<String, dynamic> json) {
+    final lat = json['lat'];
+    final lon = json['lon'];
+    if (lat == null || lon == null) {
+      return IntermediateStop(
         name: json['name'] ?? '',
-        lat: (json['lat'] as num).toDouble(),
-        lon: (json['lon'] as num).toDouble(),
+        lat: 0,
+        lon: 0,
+        gtfsId: json['gtfsId'] as String?,
       );
+    }
+    return IntermediateStop(
+      name: json['name'] ?? '',
+      lat: (lat as num).toDouble(),
+      lon: (lon as num).toDouble(),
+      gtfsId: json['gtfsId'] as String?,
+    );
+  }
 }
 
 class StopTimeData {
@@ -66,8 +94,11 @@ class StopTimeData {
 class BusLeg {
   final String busNumber;
   final String routeGtfsId;
+  final String tripId;
   final String fromStop;
   final String fromStopId;
+  final String toStopId;
+  final List<String> legStopIds;
   final double? fromLat;
   final double? fromLon;
   final String toStop;
@@ -85,8 +116,11 @@ class BusLeg {
   BusLeg({
     required this.busNumber,
     this.routeGtfsId = '',
+    this.tripId = '',
     required this.fromStop,
     required this.fromStopId,
+    this.toStopId = '',
+    this.legStopIds = const [],
     this.fromLat,
     this.fromLon,
     required this.toStop,
@@ -105,8 +139,11 @@ class BusLeg {
   Map<String, dynamic> toJson() => {
     'busNumber': busNumber,
     'routeGtfsId': routeGtfsId,
+    'tripId': tripId,
     'fromStop': fromStop,
     'fromStopId': fromStopId,
+    'toStopId': toStopId,
+    'legStopIds': legStopIds,
     'fromLat': fromLat,
     'fromLon': fromLon,
     'toStop': toStop,
@@ -125,8 +162,11 @@ class BusLeg {
   factory BusLeg.fromJson(Map<String, dynamic> json) => BusLeg(
     busNumber: json['busNumber'] ?? '',
     routeGtfsId: json['routeGtfsId'] ?? '',
+    tripId: json['tripId'] ?? '',
     fromStop: json['fromStop'] ?? '',
     fromStopId: json['fromStopId'] ?? '',
+    toStopId: json['toStopId'] ?? '',
+    legStopIds: _parseStringList(json['legStopIds']),
     fromLat: (json['fromLat'] as num?)?.toDouble(),
     fromLon: (json['fromLon'] as num?)?.toDouble(),
     toStop: json['toStop'] ?? '',

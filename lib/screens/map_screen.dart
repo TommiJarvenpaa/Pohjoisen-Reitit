@@ -29,7 +29,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   bool _hasRealLocation = false;
   bool _isSelectingStart = false;
   final MapController _mapController = MapController();
-  bool _showSearchPanel = true;
+  bool _showSearchPanel = false;
 
   bool _showBusStops = false;
   List<Map<String, dynamic>> _rawStops = [];
@@ -45,11 +45,21 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   @override
   void initState() {
     super.initState();
+    _loadUiState();
     _determinePosition();
     _stopSearchController.addListener(() {
       setState(() => _stopSearchQuery = _stopSearchController.text);
       _rebuildStopMarkers();
     });
+  }
+
+  Future<void> _loadUiState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedShowSearch = prefs.getBool('show_search_panel');
+    if (!mounted) return;
+    if (savedShowSearch != null) {
+      setState(() => _showSearchPanel = savedShowSearch);
+    }
   }
 
   void _showSnack(String message) {
@@ -180,6 +190,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (closePanel) {
       FocusScope.of(context).unfocus();
       setState(() => _showSearchPanel = false);
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setBool('show_search_panel', false),
+      );
     }
 
     final start = ref.read(startLocationProvider);
@@ -440,28 +453,40 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _showSnack('Reittitiedot kopioitu leikepöydälle!');
   }
 
-  Future<void> _pickDepartureDateTime() async {
-    final time = ref.read(departureTimeProvider);
+  Future<void> _pickDepartureTime() async {
+    final current = ref.read(departureTimeProvider);
+    final TimeOfDay? pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: current.hour, minute: current.minute),
+    );
+    if (pickedTime == null) return;
+
+    ref.read(departureTimeProvider.notifier).state = DateTime(
+      current.year,
+      current.month,
+      current.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+    _triggerSearch(); // Ei sulje paneelia
+  }
+
+  Future<void> _pickDepartureDate() async {
+    final current = ref.read(departureTimeProvider);
     final DateTime? pickedDate = await showDatePicker(
       context: context,
-      initialDate: time,
+      initialDate: current,
       firstDate: DateTime.now().subtract(const Duration(days: 1)),
       lastDate: DateTime.now().add(const Duration(days: 30)),
     );
     if (pickedDate == null || !mounted) return;
 
-    final TimeOfDay? pickedTime = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: time.hour, minute: time.minute),
-    );
-    if (pickedTime == null) return;
-
     ref.read(departureTimeProvider.notifier).state = DateTime(
       pickedDate.year,
       pickedDate.month,
       pickedDate.day,
-      pickedTime.hour,
-      pickedTime.minute,
+      current.hour,
+      current.minute,
     );
     _triggerSearch(); // Ei sulje paneelia
   }
@@ -526,9 +551,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             FilledButton(
               style: FilledButton.styleFrom(backgroundColor: kPrimary),
               onPressed: () {
-                ref.read(minTransferTimeProvider.notifier).state =
-                    tempTransferTime;
-                ref.read(walkSpeedProvider.notifier).state = tempWalkSpeed;
+                ref
+                    .read(minTransferTimeProvider.notifier)
+                    .set(tempTransferTime);
+                ref.read(walkSpeedProvider.notifier).set(tempWalkSpeed);
                 Navigator.pop(context);
 
                 if (ref.read(destinationLocationProvider) != null) {
@@ -1114,40 +1140,72 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   ],
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-                    child: GestureDetector(
-                      onTap: _pickDepartureDateTime,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 9,
-                        ),
-                        decoration: BoxDecoration(
-                          color: kSurface,
-                          borderRadius: BorderRadius.circular(30),
-                          border: Border.all(color: const Color(0xFFDDDDDD)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.schedule, size: 16, color: kBus),
-                            const SizedBox(width: 6),
-                            Text(
-                              timeLabel,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: kBus,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: _pickDepartureTime,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 9,
+                              ),
+                              decoration: BoxDecoration(
+                                color: kSurface,
+                                borderRadius: BorderRadius.circular(30),
+                                border: Border.all(
+                                  color: const Color(0xFFDDDDDD),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.schedule,
+                                    size: 16,
+                                    color: kBus,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    timeLabel,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: kBus,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  const Icon(
+                                    Icons.expand_more,
+                                    size: 16,
+                                    color: kBus,
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(width: 4),
-                            const Icon(
-                              Icons.expand_more,
-                              size: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: _pickDepartureDate,
+                          icon: const Icon(Icons.event, size: 16, color: kBus),
+                          label: const Text(
+                            'Päivä',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
                               color: kBus,
                             ),
-                          ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 ],
@@ -1260,6 +1318,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   Widget _buildRouteSheet() {
     final state = ref.watch(routeStateProvider);
+    final liveState = ref.watch(liveBusProvider);
     final favs = ref.watch(favoritesProvider);
     final dest = ref.watch(destinationLocationProvider);
     final isFav =
@@ -1438,6 +1497,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         isFavorite: isFav,
                         isOfflineData: state.isOffline,
                         formatTime: _formatTime,
+                        liveFeed: liveState.feed,
+                        tripUpdateFeed:
+                            liveState.tripUpdateFeed, // LISÄÄ TÄMÄ RIVI!
                         onTap: () {
                           ref.read(routeStateProvider.notifier).selectRoute(i);
                           _zoomToRoute(state.options, i);
@@ -1454,7 +1516,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         },
                         onShare: () => _shareRoute(state.options[i]),
                       ),
-                  SizedBox(height: 24),
+                  const SizedBox(height: 24),
                 ],
               ),
             );
@@ -1713,6 +1775,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               onPressed: () {
                 final show = !_showSearchPanel;
                 setState(() => _showSearchPanel = show);
+                SharedPreferences.getInstance().then(
+                  (prefs) => prefs.setBool('show_search_panel', show),
+                );
                 if (show && _sheetController.isAttached) {
                   _isCollapsingSheet = true;
                   _sheetController
