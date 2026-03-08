@@ -4,6 +4,31 @@ import 'package:http/http.dart' as http;
 import '../models/app_models.dart';
 import '../theme/app_colors.dart';
 import 'shimmer_widgets.dart';
+import 'route_card.dart'; // Tuodaan alkuperäinen, klikattava BusNumberBadge!
+
+// Luodaan tälle tiedostolle oma paikallinen tietorakenne, jotta
+// saamme tallennettua myös tripId:n ja routeGtfsId:n reittinäkymää varten.
+class _BoardDeparture {
+  final int scheduledEpochSec;
+  final int realtimeEpochSec;
+  final String realtimeState;
+  final bool isRealtime;
+  final String busNumber;
+  final String headsign;
+  final String tripId;
+  final String routeGtfsId;
+
+  _BoardDeparture({
+    required this.scheduledEpochSec,
+    required this.realtimeEpochSec,
+    required this.realtimeState,
+    required this.isRealtime,
+    required this.busNumber,
+    required this.headsign,
+    required this.tripId,
+    required this.routeGtfsId,
+  });
+}
 
 class StopBoardSheet extends StatefulWidget {
   final String stopId;
@@ -31,7 +56,7 @@ class StopBoardSheet extends StatefulWidget {
 
 class _StopBoardSheetState extends State<StopBoardSheet> {
   bool _isLoading = true;
-  List<StopTimeData> _departures = [];
+  List<_BoardDeparture> _departures = [];
 
   @override
   void initState() {
@@ -41,13 +66,15 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
 
   Future<void> _fetchData() async {
     final startTimeSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    // PÄIVITETTY KYSELY: Haetaan nyt myös tripin ja reitin gtfsId!
     final String query =
         """
     {
       stop(id: "${widget.stopId}") {
         stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 20) {
           scheduledDeparture realtimeDeparture realtimeState realtime serviceDay headsign
-          trip { route { shortName } }
+          trip { gtfsId route { shortName gtfsId } }
         }
       }
     }
@@ -70,9 +97,11 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
                 as List<dynamic>?;
 
         if (stoptimes != null && mounted) {
-          List<StopTimeData> departures = [];
+          List<_BoardDeparture> departures = [];
           for (var st in stoptimes) {
             String? rName = st['trip']?['route']?['shortName'];
+            String tripId = st['trip']?['gtfsId'] ?? '';
+            String routeGtfsId = st['trip']?['route']?['gtfsId'] ?? '';
             int? schedDep = st['scheduledDeparture'];
             int? realDep = st['realtimeDeparture'];
             int? serviceDay = st['serviceDay'];
@@ -82,13 +111,15 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
 
             if (rName != null && schedDep != null && serviceDay != null) {
               departures.add(
-                StopTimeData(
+                _BoardDeparture(
                   scheduledEpochSec: serviceDay + schedDep,
                   realtimeEpochSec: serviceDay + (realDep ?? schedDep),
                   realtimeState: rtState,
                   isRealtime: isRt,
                   busNumber: rName,
                   headsign: headsign,
+                  tripId: tripId,
+                  routeGtfsId: routeGtfsId,
                 ),
               );
             }
@@ -105,6 +136,9 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
 
   @override
   Widget build(BuildContext context) {
+    // LISÄTTY: Haetaan puhelimen alareunan SafeArea (navigointipalkin korkeus)
+    final bottomPadding = MediaQuery.of(context).padding.bottom;
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -162,6 +196,8 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
                 ? const Center(child: Text('Ei tulevia lähtöjä lähiaikoina.'))
                 : ListView.builder(
                     controller: widget.scrollController,
+                    // LISÄTTY: Padding alareunaan, jotta alin elementti ei jää navigointipalkin alle
+                    padding: EdgeInsets.only(bottom: bottomPadding),
                     itemCount: _departures.length,
                     itemBuilder: (context, index) {
                       final dep = _departures[index];
@@ -172,9 +208,34 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
                           dep.isRealtime &&
                           dep.realtimeEpochSec > dep.scheduledEpochSec;
 
+                      // Luodaan "vale-BussiMatka", jotta voimme käyttää reittikortin
+                      // älykästä ja klikattavaa BusNumberBadgea.
+                      final dummyLeg = BusLeg(
+                        busNumber: dep.busNumber,
+                        routeGtfsId: dep.routeGtfsId,
+                        tripId: dep.tripId,
+                        fromStop: widget.stopName,
+                        fromStopId: widget.stopId,
+                        toStop: dep.headsign,
+                        toStopId:
+                            '', // Tyhjä = Koko reitti -näkymä näyttää päätepysäkille asti!
+                        legStopIds: [widget.stopId],
+                        departureTime: depTime,
+                        arrivalTime: depTime,
+                        realtimeDeparture: depTime,
+                        realtimeState: dep.realtimeState,
+                        isRealtime: dep.isRealtime,
+                        stayOnBus: false,
+                        intermediateStops: [],
+                        alerts: [],
+                      );
+
                       return ListTile(
-                        leading: BusNumberBadge(dep.busNumber ?? ''),
-                        title: Text(dep.headsign ?? 'Päätepysäkki puuttuu'),
+                        leading: BusNumberBadge(
+                          leg: dummyLeg,
+                          formatTime: widget.formatTime,
+                        ),
+                        title: Text(dep.headsign),
                         trailing: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           crossAxisAlignment: CrossAxisAlignment.end,
@@ -204,38 +265,6 @@ class _StopBoardSheetState extends State<StopBoardSheet> {
                   ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// Laita tämä samaan tiedostoon tai erilliseen. BusNumberBadge on kopioitu route_cardista tänne riippuvuuksien helpottamiseksi.
-class BusNumberBadge extends StatelessWidget {
-  final String busNumber;
-  const BusNumberBadge(this.busNumber, {super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: kBus,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: kBus.withValues(alpha: 0.35),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Text(
-        busNumber,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: 14,
-          letterSpacing: 0.5,
-        ),
       ),
     );
   }

@@ -2,10 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import 'package:latlong2/latlong.dart';
+import '../widgets/trip_route_sheet.dart';
 import '../models/app_models.dart';
 import '../theme/app_colors.dart';
 
-/// Returns the exact realtime arrival/departure for a specific stop from TripUpdate feed
+/// Returns the exact realtime departure for a specific stop from TripUpdate feed.
+/// Prefers departure time (used for boarding stops).
 DateTime? getRealtimeStopTime(
   FeedMessage? tripUpdateFeed,
   BusLeg leg,
@@ -43,6 +45,66 @@ DateTime? getRealtimeStopTime(
               stopId == updateStopId;
 
           if (stopMatches) {
+            // Prefer departure for boarding stops
+            if (stopTimeUpdate.hasDeparture() &&
+                stopTimeUpdate.departure.hasTime()) {
+              return DateTime.fromMillisecondsSinceEpoch(
+                stopTimeUpdate.departure.time.toInt() * 1000,
+              );
+            } else if (stopTimeUpdate.hasArrival() &&
+                stopTimeUpdate.arrival.hasTime()) {
+              return DateTime.fromMillisecondsSinceEpoch(
+                stopTimeUpdate.arrival.time.toInt() * 1000,
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/// Returns the exact realtime arrival for a specific stop from TripUpdate feed.
+/// Prefers arrival time (used for alighting stops).
+DateTime? getRealtimeArrivalTime(
+  FeedMessage? tripUpdateFeed,
+  BusLeg leg,
+  String stopId,
+) {
+  if (tripUpdateFeed == null || leg.tripId.isEmpty) {
+    return null;
+  }
+
+  for (final entity in tripUpdateFeed.entity) {
+    if (!entity.hasTripUpdate()) {
+      continue;
+    }
+
+    final tripUpdate = entity.tripUpdate;
+    final trip = tripUpdate.trip;
+    final tripId = trip.tripId;
+
+    if (tripId.isEmpty) {
+      continue;
+    }
+
+    bool tripMatches =
+        (tripId == leg.tripId) ||
+        leg.tripId.endsWith(':$tripId') ||
+        leg.tripId.contains(tripId);
+
+    if (tripMatches) {
+      for (final stopTimeUpdate in tripUpdate.stopTimeUpdate) {
+        if (stopTimeUpdate.hasStopId()) {
+          final updateStopId = stopTimeUpdate.stopId;
+          bool stopMatches =
+              (updateStopId == stopId) ||
+              stopId.endsWith(':$updateStopId') ||
+              stopId == updateStopId;
+
+          if (stopMatches) {
+            // Prefer arrival for alighting stops
             if (stopTimeUpdate.hasArrival() &&
                 stopTimeUpdate.arrival.hasTime()) {
               return DateTime.fromMillisecondsSinceEpoch(
@@ -62,7 +124,7 @@ DateTime? getRealtimeStopTime(
   return null;
 }
 
-// compute time for the i‑th intermediate stop using TripUpdate if available, else fallback to estimation
+// compute time for the i-th intermediate stop using TripUpdate if available, else fallback to estimation
 String _getStopTime(
   int index,
   BusLeg leg,
@@ -233,6 +295,48 @@ int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
   return null;
 }
 
+/// Checks how late (in minutes) the transfer between [prevLeg] and [nextLeg] is.
+/// Positive = first bus arrives after next bus departs (missed).
+/// Negative = minutes of buffer remaining.
+int _transferLatenessMinutes(
+  BusLeg prevLeg,
+  BusLeg nextLeg,
+  FeedMessage? tripUpdateFeed,
+) {
+  // Realtime arrival of first bus at transfer stop
+  DateTime prevArrival = prevLeg.arrivalTime.add(
+    prevLeg.isRealtime
+        ? prevLeg.realtimeDeparture.difference(prevLeg.departureTime)
+        : Duration.zero,
+  );
+  if (tripUpdateFeed != null && prevLeg.toStopId.isNotEmpty) {
+    final exact = getRealtimeArrivalTime(
+      tripUpdateFeed,
+      prevLeg,
+      prevLeg.toStopId,
+    );
+    if (exact != null) {
+      prevArrival = exact;
+    }
+  }
+
+  // Realtime departure of second bus from transfer stop
+  DateTime nextDeparture = nextLeg.realtimeDeparture;
+  if (tripUpdateFeed != null && nextLeg.fromStopId.isNotEmpty) {
+    final exact = getRealtimeStopTime(
+      tripUpdateFeed,
+      nextLeg,
+      nextLeg.fromStopId,
+    );
+    if (exact != null) {
+      nextDeparture = exact;
+    }
+  }
+
+  // Positive means missed (prevArrival is after nextDeparture)
+  return prevArrival.difference(nextDeparture).inMinutes;
+}
+
 class RouteCard extends StatelessWidget {
   final RouteOption option;
   final bool isSelected;
@@ -279,7 +383,7 @@ class RouteCard extends StatelessWidget {
       );
 
       if (tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
-        final exactTime = getRealtimeStopTime(
+        final exactTime = getRealtimeArrivalTime(
           tripUpdateFeed,
           lastLeg,
           lastLeg.toStopId,
@@ -323,20 +427,16 @@ class RouteCard extends StatelessWidget {
     for (int i = 0; i < option.busLegs.length; i++) {
       timelineWidgets.add(const TimelineDivider());
       final leg = option.busLegs[i];
-      final realtimeCurrentStopIndex = getRealtimeCurrentStopIndex(
-        liveFeed,
-        leg,
-      );
       timelineWidgets.add(
         BusLegSection(
           leg: leg,
           formatTime: formatTime,
-          realtimeCurrentStopIndex: realtimeCurrentStopIndex,
           tripUpdateFeed: tripUpdateFeed,
         ),
       );
 
       if (i + 1 < option.busLegs.length && option.busLegs[i + 1].stayOnBus) {
+        // Stay on bus — line changes but no transfer needed
         timelineWidgets.add(const TimelineDivider());
         timelineWidgets.add(
           const Padding(
@@ -361,9 +461,108 @@ class RouteCard extends StatelessWidget {
             ),
           ),
         );
-      } else if (i + 1 < option.walkDistances.length) {
-        double nextWalk = option.walkDistances[i + 1];
+      } else if (i + 1 < option.busLegs.length) {
+        // --- FIX: Transfer warning based on live times ---
+        final nextLeg = option.busLegs[i + 1];
+        final int lateness = _transferLatenessMinutes(
+          leg,
+          nextLeg,
+          tripUpdateFeed,
+        );
 
+        if (lateness > 0) {
+          // Transfer is missed
+          timelineWidgets.add(const TimelineDivider());
+          timelineWidgets.add(
+            Padding(
+              padding: const EdgeInsets.only(left: 28, bottom: 4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: kDelayed.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: kDelayed.withValues(alpha: 0.35)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      size: 14,
+                      color: kDelayed,
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        'Vaihto linja ${nextLeg.busNumber} voi jäädä – $lateness min myöhässä',
+                        style: const TextStyle(
+                          color: kDelayed,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        } else if (lateness > -3) {
+          // Transfer is tight (less than 3 min buffer)
+          timelineWidgets.add(const TimelineDivider());
+          timelineWidgets.add(
+            Padding(
+              padding: const EdgeInsets.only(left: 28, bottom: 4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: Colors.orange.withValues(alpha: 0.35),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.schedule, size: 14, color: Colors.orange),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        'Vaihto linja ${nextLeg.busNumber} tiukka – alle 3 min',
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+
+        // Walk between transfers if any
+        if (i + 1 < option.walkDistances.length) {
+          double nextWalk = option.walkDistances[i + 1];
+          if (nextWalk > 0) {
+            timelineWidgets.add(const TimelineDivider());
+            timelineWidgets.add(
+              Padding(
+                padding: const EdgeInsets.only(left: 28, bottom: 4),
+                child: Text(
+                  'Kävele ${nextWalk.round()} m',
+                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                ),
+              ),
+            );
+          }
+        }
+      } else if (i + 1 < option.walkDistances.length) {
+        // Walk after last bus leg
+        double nextWalk = option.walkDistances[i + 1];
         if (nextWalk > 0) {
           timelineWidgets.add(const TimelineDivider());
           timelineWidgets.add(
@@ -447,7 +646,10 @@ class RouteCard extends StatelessWidget {
                               size: 14,
                               color: Colors.grey,
                             ),
-                          BusNumberBadge(option.busLegs[i].busNumber),
+                          BusNumberBadge(
+                            leg: option.busLegs[i],
+                            formatTime: formatTime,
+                          ),
                         ],
                       ],
                     ),
@@ -640,14 +842,12 @@ class TimelineDivider extends StatelessWidget {
 class BusLegSection extends StatefulWidget {
   final BusLeg leg;
   final String Function(DateTime) formatTime;
-  final int? realtimeCurrentStopIndex;
   final FeedMessage? tripUpdateFeed;
 
   const BusLegSection({
     super.key,
     required this.leg,
     required this.formatTime,
-    this.realtimeCurrentStopIndex,
     this.tripUpdateFeed,
   });
 
@@ -679,13 +879,26 @@ class _BusLegSectionState extends State<BusLegSection> {
   Widget build(BuildContext context) {
     final BusLeg leg = widget.leg;
     final bool isCanceled = leg.realtimeState == 'CANCELED';
+    final bool hasIntermediateStops = leg.intermediateStops.isNotEmpty;
+
+    // --- FIX: Get live departure time from TripUpdate for the boarding stop ---
+    DateTime realtimeDep = leg.realtimeDeparture;
+    if (widget.tripUpdateFeed != null && leg.fromStopId.isNotEmpty) {
+      final exactDep = getRealtimeStopTime(
+        widget.tripUpdateFeed,
+        leg,
+        leg.fromStopId,
+      );
+      if (exactDep != null) {
+        realtimeDep = exactDep;
+      }
+    }
+
     final bool hasDelay =
         leg.isRealtime &&
-        leg.realtimeDeparture.difference(leg.departureTime).inMinutes != 0;
-    final int delayMin = leg.realtimeDeparture
-        .difference(leg.departureTime)
-        .inMinutes;
-    final bool hasIntermediateStops = leg.intermediateStops.isNotEmpty;
+        realtimeDep.difference(leg.departureTime).inMinutes != 0;
+    final int delayMin = realtimeDep.difference(leg.departureTime).inMinutes;
+    // -------------------------------------------------------------------------
 
     // --- LASKETAAN TÄMÄN BUSSIOSUUDEN PÄÄTEPYSÄKIN TODELLINEN AIKA ---
     DateTime finalBusArrivalTime = leg.arrivalTime.add(
@@ -694,7 +907,7 @@ class _BusLegSectionState extends State<BusLegSection> {
           : Duration.zero,
     );
     if (widget.tripUpdateFeed != null && leg.toStopId.isNotEmpty) {
-      final exactTime = getRealtimeStopTime(
+      final exactTime = getRealtimeArrivalTime(
         widget.tripUpdateFeed,
         leg,
         leg.toStopId,
@@ -725,7 +938,7 @@ class _BusLegSectionState extends State<BusLegSection> {
           ),
           const SizedBox(width: 5),
           Text(
-            widget.formatTime(leg.realtimeDeparture),
+            widget.formatTime(realtimeDep),
             style: TextStyle(
               color: delayMin > 0 ? kDelayed : kOnTime,
               fontWeight: FontWeight.bold,
@@ -920,13 +1133,10 @@ class _BusLegSectionState extends State<BusLegSection> {
                     ],
                   ),
 
-                // PÄÄTEPYSÄKKI - NYT KÄYTETÄÄN TODELLISTA AIKAA!
                 Row(
                   children: [
                     Text(
-                      widget.formatTime(
-                        finalBusArrivalTime,
-                      ), // PÄIVITETTY TÄHÄN
+                      widget.formatTime(finalBusArrivalTime),
                       style: const TextStyle(
                         fontWeight: FontWeight.w600,
                         fontSize: 13,
@@ -952,30 +1162,68 @@ class _BusLegSectionState extends State<BusLegSection> {
 }
 
 class BusNumberBadge extends StatelessWidget {
-  final String busNumber;
-  const BusNumberBadge(this.busNumber, {super.key});
+  final BusLeg
+  leg; // PÄIVITETTY: Nyt otetaan koko leg sisään, jotta saamme tripId:n
+  final String Function(DateTime) formatTime;
+
+  const BusNumberBadge({
+    super.key,
+    required this.leg,
+    required this.formatTime,
+  });
+
+  void _showTripRoute(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.9,
+        builder: (context, scrollController) {
+          // Kiedotaan se ProviderScopeen jos käytät Riverpodia TripRouteSheetissä
+          return TripRouteSheet(leg: leg, formatTime: formatTime);
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: kBus,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: kBus.withValues(alpha: 0.35),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Text(
-        busNumber,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: 14,
-          letterSpacing: 0.5,
+    return GestureDetector(
+      onTap: () => _showTripRoute(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: kBus,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: kBus.withValues(alpha: 0.35),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              leg.busNumber,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(width: 4),
+            const Icon(Icons.info_outline, color: Colors.white, size: 12),
+          ],
         ),
       ),
     );

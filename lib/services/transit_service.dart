@@ -125,6 +125,58 @@ class TransitService {
     return [];
   }
 
+  Future<List<Map<String, dynamic>>?> fetchTripRoute(
+    String tripId,
+    String gtfsId,
+  ) async {
+    if (tripId.isEmpty) return null;
+
+    final String query =
+        """
+    {
+      trip(id: "$tripId") {
+        stoptimes {
+          stop {
+            name
+            gtfsId
+            lat
+            lon
+          }
+          scheduledDeparture
+          realtimeDeparture
+          realtimeState
+          realtime
+          serviceDay
+        }
+      }
+    }
+    """;
+
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.digitransit.fi/routing/v2/waltti/gtfs/v1'),
+        headers: {
+          'Content-Type': 'application/json',
+          'digitransit-subscription-key': digitransitKey,
+        },
+        body: json.encode({'query': query}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final tripData = data['data']?['trip'];
+
+        if (tripData != null && tripData['stoptimes'] != null) {
+          final stoptimes = tripData['stoptimes'] as List<dynamic>;
+          return stoptimes.map((st) => Map<String, dynamic>.from(st)).toList();
+        }
+      }
+    } catch (e) {
+      debugPrint('Error fetching full trip route: $e');
+    }
+    return null;
+  }
+
   Future<List<RouteOption>> fetchRoutes(
     double startLat,
     double startLon,

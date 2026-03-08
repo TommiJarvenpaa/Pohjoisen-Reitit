@@ -810,6 +810,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         ),
                         onTap: () {
                           Navigator.pop(ctx);
+
+                          // 1. Asetetaan aina määränpää
                           ref
                               .read(destinationLocationProvider.notifier)
                               .state = Place(
@@ -817,7 +819,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             lat: fav.destLat,
                             lon: fav.destLon,
                           );
-                          if (fav.startLat != null) {
+
+                          // 2. Asetetaan lähtöpaikka TAI nollataan se
+                          if (fav.startLat != null && fav.startLon != null) {
                             ref
                                 .read(startLocationProvider.notifier)
                                 .state = Place(
@@ -825,7 +829,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               lat: fav.startLat!,
                               lon: fav.startLon!,
                             );
+                          } else {
+                            // TÄMÄ ON SE KORJAUS: Nollataan lähtöpaikka,
+                            // jotta sovellus käyttää taas automaattisesti GPS:ää!
+                            ref.read(startLocationProvider.notifier).state =
+                                null;
                           }
+
+                          // 3. Etsitään reitti
                           _triggerSearch(
                             closePanel: true,
                           ); // Suljetaan paneeli jotta reitti näkyy selvästi!
