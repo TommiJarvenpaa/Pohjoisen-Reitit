@@ -252,8 +252,14 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
   Future<void> fetchBuses() async {
     if (state.isFetching) return;
     state = state.copyWith(isFetching: true);
-    final feed = await _api.fetchLiveBuses();
-    if (state.isActive) state = state.copyWith(feed: feed, isFetching: false);
+    try {
+      final feed = await _api.fetchLiveBuses();
+      if (state.isActive) state = state.copyWith(feed: feed, isFetching: false);
+    } catch (_) {
+      // Verkkokatkos – ei hälytellä, yritetään uudelleen ensi kierroksella
+    } finally {
+      if (state.isFetching) state = state.copyWith(isFetching: false);
+    }
   }
 
   Future<void> fetchTripUpdates() async {
@@ -319,15 +325,13 @@ class FavoritesNotifier extends StateNotifier<List<FavoriteRoute>> {
     );
   }
 
-  void removeFavorite(int index) {
-    var list = [...state];
-    list.removeAt(index);
+  Future<void> removeFavorite(int index) async {
+    final list = [...state]..removeAt(index);
     state = list;
-    SharedPreferences.getInstance().then(
-      (prefs) => prefs.setStringList(
-        'favorites',
-        state.map((f) => json.encode(f.toJson())).toList(),
-      ),
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      'favorites',
+      state.map((f) => json.encode(f.toJson())).toList(),
     );
   }
 }

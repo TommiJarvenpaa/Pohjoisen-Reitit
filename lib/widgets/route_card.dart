@@ -1,137 +1,89 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import 'package:latlong2/latlong.dart';
-import '../widgets/trip_route_sheet.dart';
 import '../models/app_models.dart';
 import '../theme/app_colors.dart';
+import '../widgets/trip_route_sheet.dart';
 
-/// Returns the exact realtime departure for a specific stop from TripUpdate feed.
-/// Prefers departure time (used for boarding stops).
+/// Poistaa namespace-etuliitteen ("waltti:", "HSL:" jne.) ja
+/// päivämääräsuffiksin ("_20240330") trip ID:stä vertailua varten.
+/// Estää osittaiset osumat, esim. "100123456" ei osu "1001234567":ään.
+String _tripCore(String tripId) {
+  String id = tripId.contains(':') ? tripId.split(':').last : tripId;
+  if (id.contains('_')) id = id.split('_').first;
+  return id;
+}
+
+bool _tripIdMatches(String feedTripId, String legTripId) {
+  if (feedTripId == legTripId) return true;
+  return _tripCore(feedTripId) == _tripCore(legTripId);
+}
+
+DateTime? _findStopTime(
+  FeedMessage? tripUpdateFeed,
+  BusLeg leg,
+  String stopId, {
+  required bool preferDeparture,
+}) {
+  if (tripUpdateFeed == null || leg.tripId.isEmpty) return null;
+
+  for (final entity in tripUpdateFeed.entity) {
+    if (!entity.hasTripUpdate()) continue;
+    final tripUpdate = entity.tripUpdate;
+    final tripId = tripUpdate.trip.tripId;
+    if (tripId.isEmpty) continue;
+
+    if (!_tripIdMatches(tripId, leg.tripId)) continue;
+
+    for (final stu in tripUpdate.stopTimeUpdate) {
+      if (!stu.hasStopId()) continue;
+      final updateStopId = stu.stopId;
+      final bool stopMatches =
+          updateStopId == stopId ||
+          stopId.endsWith(':$updateStopId') ||
+          stopId == updateStopId;
+      if (!stopMatches) continue;
+
+      final first = preferDeparture
+          ? (stu.hasDeparture() && stu.departure.hasTime()
+              ? DateTime.fromMillisecondsSinceEpoch(stu.departure.time.toInt() * 1000)
+              : null)
+          : (stu.hasArrival() && stu.arrival.hasTime()
+              ? DateTime.fromMillisecondsSinceEpoch(stu.arrival.time.toInt() * 1000)
+              : null);
+      if (first != null) return first;
+
+      final second = preferDeparture
+          ? (stu.hasArrival() && stu.arrival.hasTime()
+              ? DateTime.fromMillisecondsSinceEpoch(stu.arrival.time.toInt() * 1000)
+              : null)
+          : (stu.hasDeparture() && stu.departure.hasTime()
+              ? DateTime.fromMillisecondsSinceEpoch(stu.departure.time.toInt() * 1000)
+              : null);
+      if (second != null) return second;
+    }
+  }
+  return null;
+}
+
 DateTime? getRealtimeStopTime(
   FeedMessage? tripUpdateFeed,
   BusLeg leg,
   String stopId,
-) {
-  if (tripUpdateFeed == null || leg.tripId.isEmpty) {
-    return null;
-  }
+) => _findStopTime(tripUpdateFeed, leg, stopId, preferDeparture: true);
 
-  for (final entity in tripUpdateFeed.entity) {
-    if (!entity.hasTripUpdate()) {
-      continue;
-    }
-
-    final tripUpdate = entity.tripUpdate;
-    final trip = tripUpdate.trip;
-    final tripId = trip.tripId;
-
-    if (tripId.isEmpty) {
-      continue;
-    }
-
-    bool tripMatches =
-        (tripId == leg.tripId) ||
-        leg.tripId.endsWith(':$tripId') ||
-        leg.tripId.contains(tripId);
-
-    if (tripMatches) {
-      for (final stopTimeUpdate in tripUpdate.stopTimeUpdate) {
-        if (stopTimeUpdate.hasStopId()) {
-          final updateStopId = stopTimeUpdate.stopId;
-          bool stopMatches =
-              (updateStopId == stopId) ||
-              stopId.endsWith(':$updateStopId') ||
-              stopId == updateStopId;
-
-          if (stopMatches) {
-            // Prefer departure for boarding stops
-            if (stopTimeUpdate.hasDeparture() &&
-                stopTimeUpdate.departure.hasTime()) {
-              return DateTime.fromMillisecondsSinceEpoch(
-                stopTimeUpdate.departure.time.toInt() * 1000,
-              );
-            } else if (stopTimeUpdate.hasArrival() &&
-                stopTimeUpdate.arrival.hasTime()) {
-              return DateTime.fromMillisecondsSinceEpoch(
-                stopTimeUpdate.arrival.time.toInt() * 1000,
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/// Returns the exact realtime arrival for a specific stop from TripUpdate feed.
-/// Prefers arrival time (used for alighting stops).
 DateTime? getRealtimeArrivalTime(
   FeedMessage? tripUpdateFeed,
   BusLeg leg,
   String stopId,
-) {
-  if (tripUpdateFeed == null || leg.tripId.isEmpty) {
-    return null;
-  }
+) => _findStopTime(tripUpdateFeed, leg, stopId, preferDeparture: false);
 
-  for (final entity in tripUpdateFeed.entity) {
-    if (!entity.hasTripUpdate()) {
-      continue;
-    }
-
-    final tripUpdate = entity.tripUpdate;
-    final trip = tripUpdate.trip;
-    final tripId = trip.tripId;
-
-    if (tripId.isEmpty) {
-      continue;
-    }
-
-    bool tripMatches =
-        (tripId == leg.tripId) ||
-        leg.tripId.endsWith(':$tripId') ||
-        leg.tripId.contains(tripId);
-
-    if (tripMatches) {
-      for (final stopTimeUpdate in tripUpdate.stopTimeUpdate) {
-        if (stopTimeUpdate.hasStopId()) {
-          final updateStopId = stopTimeUpdate.stopId;
-          bool stopMatches =
-              (updateStopId == stopId) ||
-              stopId.endsWith(':$updateStopId') ||
-              stopId == updateStopId;
-
-          if (stopMatches) {
-            // Prefer arrival for alighting stops
-            if (stopTimeUpdate.hasArrival() &&
-                stopTimeUpdate.arrival.hasTime()) {
-              return DateTime.fromMillisecondsSinceEpoch(
-                stopTimeUpdate.arrival.time.toInt() * 1000,
-              );
-            } else if (stopTimeUpdate.hasDeparture() &&
-                stopTimeUpdate.departure.hasTime()) {
-              return DateTime.fromMillisecondsSinceEpoch(
-                stopTimeUpdate.departure.time.toInt() * 1000,
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-  return null;
-}
-
-// compute time for the i-th intermediate stop using TripUpdate if available, else fallback to estimation
 String _getStopTime(
   int index,
   BusLeg leg,
   FeedMessage? tripUpdateFeed,
   String Function(DateTime) fmt,
 ) {
-  // 1. Try to get the exact time from the TripUpdate feed
   if (tripUpdateFeed != null && leg.legStopIds.length > index + 1) {
     final String stopId = leg.legStopIds[index + 1];
     final DateTime? exactTime = getRealtimeStopTime(
@@ -145,7 +97,6 @@ String _getStopTime(
     }
   }
 
-  // 2. Fallback to the mathematical estimation
   final Duration delay = leg.isRealtime
       ? leg.realtimeDeparture.difference(leg.departureTime)
       : Duration.zero;
@@ -164,7 +115,6 @@ String _getStopTime(
   return fmt(realtimeT);
 }
 
-/// Returns the index in [leg].legStopIds of the vehicle's current/next stop, or null if no match.
 int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
   if (feed == null || leg.tripId.isEmpty || leg.legStopIds.isEmpty) {
     return null;
@@ -188,14 +138,7 @@ int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
       continue;
     }
 
-    bool tripMatches =
-        (tripId == leg.tripId) ||
-        leg.tripId.endsWith(':$tripId') ||
-        leg.tripId.contains(tripId);
-
-    if (!tripMatches) {
-      continue;
-    }
+    if (!_tripIdMatches(tripId, leg.tripId)) continue;
 
     final routeId = trip.routeId;
     final legRoute = leg.routeGtfsId;
@@ -265,10 +208,6 @@ int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
                 assignedIdx = closestIdx;
               }
             }
-
-            debugPrint(
-              'Realtime heuristic for ${leg.busNumber}: closest=$closestIdx (${bestDist.toStringAsFixed(0)}m), assigned=$assignedIdx',
-            );
             return assignedIdx;
           }
         }
@@ -286,24 +225,17 @@ int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
     }
 
     if (idx >= 0) {
-      debugPrint(
-        'Realtime match found! Bus ${leg.busNumber} is at stop index $idx (stopId: $stopId)',
-      );
       return idx;
     }
   }
   return null;
 }
 
-/// Checks how late (in minutes) the transfer between [prevLeg] and [nextLeg] is.
-/// Positive = first bus arrives after next bus departs (missed).
-/// Negative = minutes of buffer remaining.
 int _transferLatenessMinutes(
   BusLeg prevLeg,
   BusLeg nextLeg,
   FeedMessage? tripUpdateFeed,
 ) {
-  // Realtime arrival of first bus at transfer stop
   DateTime prevArrival = prevLeg.arrivalTime.add(
     prevLeg.isRealtime
         ? prevLeg.realtimeDeparture.difference(prevLeg.departureTime)
@@ -320,7 +252,6 @@ int _transferLatenessMinutes(
     }
   }
 
-  // Realtime departure of second bus from transfer stop
   DateTime nextDeparture = nextLeg.realtimeDeparture;
   if (tripUpdateFeed != null && nextLeg.fromStopId.isNotEmpty) {
     final exact = getRealtimeStopTime(
@@ -333,11 +264,11 @@ int _transferLatenessMinutes(
     }
   }
 
-  // Positive means missed (prevArrival is after nextDeparture)
   return prevArrival.difference(nextDeparture).inMinutes;
 }
 
-class RouteCard extends StatelessWidget {
+// --- PÄÄKORTTI ---
+class RouteCard extends StatefulWidget {
   final RouteOption option;
   final bool isSelected;
   final bool isFavorite;
@@ -364,15 +295,93 @@ class RouteCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final isWalkOnly = option.busLegs.isEmpty;
-    final allAlerts = option.busLegs.expand((leg) => leg.alerts).toList();
+  State<RouteCard> createState() => _RouteCardState();
+}
 
-    // --- LASKETAAN KOKO KORTIN TODELLINEN SAAPUMISAIKA ---
-    DateTime realArrivalTime = option.arrivalTime;
-    if (option.busLegs.isNotEmpty) {
-      final lastLeg = option.busLegs.last;
-      final Duration walkAfterBus = option.arrivalTime.difference(
+class _RouteCardState extends State<RouteCard> {
+  bool _isExpanded = false;
+
+  Widget _buildGraphicalTimeline() {
+    List<Widget> items = [];
+
+    if (widget.option.busLegs.isEmpty) {
+      items.add(const Icon(Icons.directions_walk, size: 18, color: kWalk));
+      items.add(const SizedBox(width: 6));
+      items.add(
+        const Icon(Icons.arrow_right_alt_rounded, size: 20, color: Colors.grey),
+      );
+      items.add(const SizedBox(width: 6));
+      items.add(const Icon(Icons.flag_rounded, size: 18, color: kPrimary));
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        runSpacing: 8,
+        children: items,
+      );
+    }
+
+    for (int i = 0; i < widget.option.busLegs.length; i++) {
+      if (widget.option.walkDistances[i] > 0) {
+        items.add(const Icon(Icons.directions_walk, size: 16, color: kWalk));
+        items.add(const SizedBox(width: 4));
+        items.add(
+          const Icon(
+            Icons.arrow_right_alt_rounded,
+            size: 18,
+            color: Colors.grey,
+          ),
+        );
+        items.add(const SizedBox(width: 4));
+      }
+
+      items.add(
+        BusNumberBadge(
+          leg: widget.option.busLegs[i],
+          formatTime: widget.formatTime,
+        ),
+      );
+
+      if (i < widget.option.busLegs.length - 1 ||
+          (i + 1 < widget.option.walkDistances.length &&
+              widget.option.walkDistances[i + 1] > 0)) {
+        items.add(const SizedBox(width: 4));
+        items.add(
+          const Icon(
+            Icons.arrow_right_alt_rounded,
+            size: 18,
+            color: Colors.grey,
+          ),
+        );
+        items.add(const SizedBox(width: 4));
+      }
+    }
+
+    if (widget.option.walkDistances.last > 0) {
+      items.add(const Icon(Icons.directions_walk, size: 16, color: kWalk));
+      items.add(const SizedBox(width: 4));
+      items.add(
+        const Icon(Icons.arrow_right_alt_rounded, size: 18, color: Colors.grey),
+      );
+      items.add(const SizedBox(width: 4));
+    }
+    items.add(const Icon(Icons.flag_rounded, size: 18, color: kPrimary));
+
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      runSpacing: 8,
+      children: items,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allAlerts = widget.option.busLegs
+        .expand((leg) => leg.alerts)
+        .toList();
+
+    DateTime realArrivalTime = widget.option.arrivalTime;
+    if (widget.option.busLegs.isNotEmpty) {
+      final lastLeg = widget.option.busLegs.last;
+      final Duration walkAfterBus = widget.option.arrivalTime.difference(
         lastLeg.arrivalTime,
       );
 
@@ -382,9 +391,9 @@ class RouteCard extends StatelessWidget {
             : Duration.zero,
       );
 
-      if (tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
+      if (widget.tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
         final exactTime = getRealtimeArrivalTime(
-          tripUpdateFeed,
+          widget.tripUpdateFeed,
           lastLeg,
           lastLeg.toStopId,
         );
@@ -396,47 +405,46 @@ class RouteCard extends StatelessWidget {
     }
 
     final totalMinutes = realArrivalTime
-        .difference(option.leaveHomeTime)
+        .difference(widget.option.leaveHomeTime)
         .inMinutes;
-    // -------------------------------------------------------
 
     List<Widget> timelineWidgets = [];
-
     timelineWidgets.add(
       TimelineRow(
         icon: Icons.directions_walk,
         iconColor: kWalk,
-        label: 'Lähde klo ${formatTime(option.leaveHomeTime)}',
+        label: 'Lähde klo ${widget.formatTime(widget.option.leaveHomeTime)}',
         labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
       ),
     );
 
-    if (option.walkDistances.isNotEmpty && option.walkDistances[0] > 0) {
+    if (widget.option.walkDistances.isNotEmpty &&
+        widget.option.walkDistances[0] > 0) {
       timelineWidgets.add(const TimelineDivider());
       timelineWidgets.add(
         Padding(
           padding: const EdgeInsets.only(left: 28, bottom: 4),
           child: Text(
-            'Kävele ${option.walkDistances[0].round()} m',
+            'Kävele ${widget.option.walkDistances[0].round()} m',
             style: TextStyle(color: Colors.grey[600], fontSize: 12),
           ),
         ),
       );
     }
 
-    for (int i = 0; i < option.busLegs.length; i++) {
+    for (int i = 0; i < widget.option.busLegs.length; i++) {
       timelineWidgets.add(const TimelineDivider());
-      final leg = option.busLegs[i];
+      final leg = widget.option.busLegs[i];
       timelineWidgets.add(
         BusLegSection(
           leg: leg,
-          formatTime: formatTime,
-          tripUpdateFeed: tripUpdateFeed,
+          formatTime: widget.formatTime,
+          tripUpdateFeed: widget.tripUpdateFeed,
         ),
       );
 
-      if (i + 1 < option.busLegs.length && option.busLegs[i + 1].stayOnBus) {
-        // Stay on bus — line changes but no transfer needed
+      if (i + 1 < widget.option.busLegs.length &&
+          widget.option.busLegs[i + 1].stayOnBus) {
         timelineWidgets.add(const TimelineDivider());
         timelineWidgets.add(
           const Padding(
@@ -461,17 +469,15 @@ class RouteCard extends StatelessWidget {
             ),
           ),
         );
-      } else if (i + 1 < option.busLegs.length) {
-        // --- FIX: Transfer warning based on live times ---
-        final nextLeg = option.busLegs[i + 1];
+      } else if (i + 1 < widget.option.busLegs.length) {
+        final nextLeg = widget.option.busLegs[i + 1];
         final int lateness = _transferLatenessMinutes(
           leg,
           nextLeg,
-          tripUpdateFeed,
+          widget.tripUpdateFeed,
         );
 
         if (lateness > 0) {
-          // Transfer is missed
           timelineWidgets.add(const TimelineDivider());
           timelineWidgets.add(
             Padding(
@@ -508,7 +514,6 @@ class RouteCard extends StatelessWidget {
             ),
           );
         } else if (lateness > -3) {
-          // Transfer is tight (less than 3 min buffer)
           timelineWidgets.add(const TimelineDivider());
           timelineWidgets.add(
             Padding(
@@ -544,9 +549,8 @@ class RouteCard extends StatelessWidget {
           );
         }
 
-        // Walk between transfers if any
-        if (i + 1 < option.walkDistances.length) {
-          double nextWalk = option.walkDistances[i + 1];
+        if (i + 1 < widget.option.walkDistances.length) {
+          double nextWalk = widget.option.walkDistances[i + 1];
           if (nextWalk > 0) {
             timelineWidgets.add(const TimelineDivider());
             timelineWidgets.add(
@@ -560,16 +564,19 @@ class RouteCard extends StatelessWidget {
             );
           }
         }
-      } else if (i + 1 < option.walkDistances.length) {
-        // Walk after last bus leg
-        double nextWalk = option.walkDistances[i + 1];
-        if (nextWalk > 0) {
+      }
+
+      // Kävely viimeisen bussivaiheen jälkeen
+      if (i + 1 == widget.option.busLegs.length &&
+          i + 1 < widget.option.walkDistances.length) {
+        final lastWalk = widget.option.walkDistances[i + 1];
+        if (lastWalk > 0) {
           timelineWidgets.add(const TimelineDivider());
           timelineWidgets.add(
             Padding(
               padding: const EdgeInsets.only(left: 28, bottom: 4),
               child: Text(
-                'Kävele ${nextWalk.round()} m',
+                'Kävele ${lastWalk.round()} m',
                 style: TextStyle(color: Colors.grey[600], fontSize: 12),
               ),
             ),
@@ -579,24 +586,34 @@ class RouteCard extends StatelessWidget {
     }
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFF0F4FF) : Colors.white,
-          borderRadius: BorderRadius.circular(18),
+          gradient: widget.isSelected
+              ? const LinearGradient(
+                  colors: [Color(0xFFEEF2FF), Colors.white],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                )
+              : null,
+          color: widget.isSelected ? null : Colors.white,
+          borderRadius: BorderRadius.circular(24),
           border: Border.all(
-            color: isSelected ? kBus : Colors.transparent,
-            width: 2,
+            color: widget.isSelected
+                ? kBus.withValues(alpha: 0.35)
+                : Colors.grey.withValues(alpha: 0.15),
+            width: widget.isSelected ? 2 : 1,
           ),
           boxShadow: [
             BoxShadow(
-              color: isSelected
-                  ? kBus.withValues(alpha: 0.15)
-                  : Colors.black.withValues(alpha: 0.07),
-              blurRadius: isSelected ? 16 : 10,
-              offset: const Offset(0, 3),
+              color: widget.isSelected
+                  ? kBus.withValues(alpha: 0.1)
+                  : Colors.black.withValues(alpha: 0.05),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
             ),
           ],
         ),
@@ -605,12 +622,12 @@ class RouteCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (isOfflineData)
+              if (widget.isOfflineData)
                 Container(
-                  margin: const EdgeInsets.only(bottom: 8),
+                  margin: const EdgeInsets.only(bottom: 12),
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
+                    horizontal: 10,
+                    vertical: 4,
                   ),
                   decoration: BoxDecoration(
                     color: Colors.orange.withValues(alpha: 0.15),
@@ -622,182 +639,240 @@ class RouteCard extends StatelessWidget {
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.wifi_off, size: 12, color: Colors.orange),
-                      SizedBox(width: 4),
+                      Icon(Icons.wifi_off, size: 14, color: Colors.orange),
+                      SizedBox(width: 6),
                       Text(
                         'Tallennettu reitti – ei reaaliaikainen',
-                        style: TextStyle(fontSize: 10, color: Colors.orange),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ],
                   ),
                 ),
+
               Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  if (isWalkOnly)
-                    const WalkBadge()
-                  else
-                    Wrap(
-                      spacing: 6,
-                      children: [
-                        for (int i = 0; i < option.busLegs.length; i++) ...[
-                          if (i > 0)
-                            const Icon(
-                              Icons.arrow_forward,
-                              size: 14,
-                              color: Colors.grey,
-                            ),
-                          BusNumberBadge(
-                            leg: option.busLegs[i],
-                            formatTime: formatTime,
-                          ),
-                        ],
-                      ],
+                  Text(
+                    widget.formatTime(widget.option.leaveHomeTime),
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF222222),
+                      letterSpacing: -0.5,
                     ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 6, left: 8, right: 8),
+                    child: Icon(
+                      Icons.arrow_forward_rounded,
+                      color: Colors.grey,
+                      size: 20,
+                    ),
+                  ),
+                  Text(
+                    widget.formatTime(realArrivalTime),
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF222222),
+                      letterSpacing: -0.5,
+                    ),
+                  ),
                   const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: widget.isSelected
+                              ? kBus.withValues(alpha: 0.15)
+                              : kSurface,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          '$totalMinutes min',
+                          style: TextStyle(
+                            color: widget.isSelected ? kBus : Colors.grey[700],
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              _buildGraphicalTimeline(),
+
+              const SizedBox(height: 4),
+
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _isExpanded = !_isExpanded;
+                      });
+                    },
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
-                    decoration: BoxDecoration(
-                      color: isSelected
-                          ? kBus.withValues(alpha: 0.1)
-                          : kSurface,
-                      borderRadius: BorderRadius.circular(12),
+                    icon: Icon(
+                      _isExpanded
+                          ? Icons.expand_less_rounded
+                          : Icons.expand_more_rounded,
+                      color: kPrimary,
+                      size: 20,
                     ),
-                    child: Text(
-                      '$totalMinutes min',
-                      style: TextStyle(
-                        color: isSelected ? kBus : Colors.grey[600],
+                    label: Text(
+                      _isExpanded ? 'Piilota tiedot' : 'Näytä tiedot',
+                      style: const TextStyle(
+                        color: kPrimary,
                         fontWeight: FontWeight.w600,
                         fontSize: 13,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 4),
-                  GestureDetector(
-                    onTap: onShare,
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      child: Icon(
-                        Icons.share,
-                        size: 18,
-                        color: Colors.grey[400],
-                      ),
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: onToggleFavorite,
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      child: Icon(
-                        isFavorite
-                            ? Icons.star_rounded
-                            : Icons.star_border_rounded,
-                        size: 20,
-                        color: isFavorite ? kAccent : Colors.grey[400],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              ...timelineWidgets,
-              const SizedBox(height: 8),
-              const Divider(height: 1, color: Color(0xFFEEEEEE)),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const Icon(Icons.flag_rounded, color: kPrimary, size: 18),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Perillä klo ${formatTime(realArrivalTime)}',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      color: kPrimaryDark,
-                    ),
-                  ),
-                ],
-              ),
-              if (allAlerts.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: kAlert.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: kAlert.withValues(alpha: 0.3)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.warning_amber_rounded,
-                              color: kAlert,
-                              size: 16,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Häiriötiedote${allAlerts.length > 1 ? 't' : ''}',
-                              style: const TextStyle(
-                                color: kAlert,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: widget.onShare,
+                        icon: Icon(
+                          Icons.share_outlined,
+                          size: 20,
+                          color: Colors.grey[500],
                         ),
-                        for (final alert in allAlerts)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              alert.text,
-                              style: TextStyle(
-                                color: Colors.grey[800],
-                                fontSize: 11,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: widget.onToggleFavorite,
+                        icon: Icon(
+                          widget.isFavorite
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
+                          size: 24,
+                          color: widget.isFavorite ? kAccent : Colors.grey[400],
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+
+              AnimatedSize(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                child: _isExpanded
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 12),
+                          const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                          const SizedBox(height: 16),
+                          ...timelineWidgets,
+                          const SizedBox(height: 10),
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.flag_rounded,
+                                color: kPrimary,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Perillä klo ${widget.formatTime(realArrivalTime)}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 14,
+                                  color: kPrimaryDark,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (allAlerts.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 16),
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: kAlert.withValues(alpha: 0.08),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: kAlert.withValues(alpha: 0.3),
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.warning_amber_rounded,
+                                          color: kAlert,
+                                          size: 18,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'Häiriötiedote${allAlerts.length > 1 ? 't' : ''}',
+                                          style: const TextStyle(
+                                            color: kAlert,
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    for (final alert in allAlerts)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 6),
+                                        child: Text(
+                                          alert.text,
+                                          style: TextStyle(
+                                            color: Colors.grey[800],
+                                            fontSize: 12,
+                                            height: 1.4,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
+                        ],
+                      )
+                    : const SizedBox.shrink(),
+              ),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class WalkBadge extends StatelessWidget {
-  const WalkBadge({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: kWalk,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.directions_walk, color: Colors.white, size: 14),
-          SizedBox(width: 4),
-          Text(
-            'Kävely',
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: 13,
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -857,23 +932,6 @@ class BusLegSection extends StatefulWidget {
 
 class _BusLegSectionState extends State<BusLegSection> {
   bool _showStops = false;
-  Timer? _fallbackTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _fallbackTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
-      if (mounted) {
-        setState(() {});
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _fallbackTimer?.cancel();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -881,7 +939,6 @@ class _BusLegSectionState extends State<BusLegSection> {
     final bool isCanceled = leg.realtimeState == 'CANCELED';
     final bool hasIntermediateStops = leg.intermediateStops.isNotEmpty;
 
-    // --- FIX: Get live departure time from TripUpdate for the boarding stop ---
     DateTime realtimeDep = leg.realtimeDeparture;
     if (widget.tripUpdateFeed != null && leg.fromStopId.isNotEmpty) {
       final exactDep = getRealtimeStopTime(
@@ -898,9 +955,7 @@ class _BusLegSectionState extends State<BusLegSection> {
         leg.isRealtime &&
         realtimeDep.difference(leg.departureTime).inMinutes != 0;
     final int delayMin = realtimeDep.difference(leg.departureTime).inMinutes;
-    // -------------------------------------------------------------------------
 
-    // --- LASKETAAN TÄMÄN BUSSIOSUUDEN PÄÄTEPYSÄKIN TODELLINEN AIKA ---
     DateTime finalBusArrivalTime = leg.arrivalTime.add(
       leg.isRealtime
           ? leg.realtimeDeparture.difference(leg.departureTime)
@@ -916,7 +971,6 @@ class _BusLegSectionState extends State<BusLegSection> {
         finalBusArrivalTime = exactTime;
       }
     }
-    // -----------------------------------------------------------------
 
     Widget cancelOrDelayWidget = const SizedBox.shrink();
 
@@ -1162,8 +1216,7 @@ class _BusLegSectionState extends State<BusLegSection> {
 }
 
 class BusNumberBadge extends StatelessWidget {
-  final BusLeg
-  leg; // PÄIVITETTY: Nyt otetaan koko leg sisään, jotta saamme tripId:n
+  final BusLeg leg;
   final String Function(DateTime) formatTime;
 
   const BusNumberBadge({
@@ -1185,7 +1238,6 @@ class BusNumberBadge extends StatelessWidget {
         minChildSize: 0.4,
         maxChildSize: 0.9,
         builder: (context, scrollController) {
-          // Kiedotaan se ProviderScopeen jos käytät Riverpodia TripRouteSheetissä
           return TripRouteSheet(leg: leg, formatTime: formatTime);
         },
       ),

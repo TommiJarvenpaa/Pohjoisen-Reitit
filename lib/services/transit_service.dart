@@ -421,7 +421,7 @@ class TransitService {
             gtfsId
             stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 30) {
               scheduledDeparture realtimeDeparture realtimeState realtime serviceDay
-              trip { route { shortName } }
+              trip { gtfsId route { shortName } }
             }
           }
         """;
@@ -454,6 +454,7 @@ class TransitService {
                 if (stoptimes != null) {
                   for (var st in stoptimes) {
                     String? rName = st['trip']?['route']?['shortName'];
+                    String stTripId = st['trip']?['gtfsId'] ?? '';
                     int? schedDep = st['scheduledDeparture'];
                     int? realDep = st['realtimeDeparture'];
                     int? serviceDay = st['serviceDay'];
@@ -473,6 +474,7 @@ class TransitService {
                                   serviceDay + (realDep ?? schedDep),
                               realtimeState: rtState,
                               isRealtime: isRt,
+                              tripId: stTripId,
                             ),
                           );
                     }
@@ -514,6 +516,7 @@ class TransitService {
                     DateTime legRealDep = baseLeg.departureTime.add(offset);
                     String state = 'SCHEDULED';
                     bool isRt = false;
+                    String clonedTripId = baseLeg.tripId;
 
                     if (k == 0) {
                       legRealDep = DateTime.fromMillisecondsSinceEpoch(
@@ -521,13 +524,16 @@ class TransitService {
                       );
                       state = stData.realtimeState;
                       isRt = stData.isRealtime;
+                      if (stData.tripId.isNotEmpty) {
+                        clonedTripId = stData.tripId;
+                      }
                     }
 
                     clonedLegs.add(
                       BusLeg(
                         busNumber: baseLeg.busNumber,
                         routeGtfsId: baseLeg.routeGtfsId,
-                        tripId: baseLeg.tripId,
+                        tripId: clonedTripId,
                         fromStop: baseLeg.fromStop,
                         fromStopId: baseLeg.fromStopId,
                         toStopId: baseLeg.toStopId,

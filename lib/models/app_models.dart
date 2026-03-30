@@ -80,6 +80,7 @@ class StopTimeData {
   final bool isRealtime;
   final String? busNumber;
   final String? headsign;
+  final String tripId;
 
   StopTimeData({
     required this.scheduledEpochSec,
@@ -88,6 +89,7 @@ class StopTimeData {
     required this.isRealtime,
     this.busNumber,
     this.headsign,
+    this.tripId = '',
   });
 }
 

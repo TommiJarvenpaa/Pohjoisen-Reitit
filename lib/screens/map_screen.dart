@@ -14,6 +14,7 @@ import '../models/app_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/shimmer_widgets.dart';
 import '../widgets/map_markers.dart';
+import '../widgets/live_indicator.dart';
 import '../widgets/route_card.dart';
 import '../widgets/stop_board_sheet.dart';
 
@@ -76,7 +77,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   @override
   void dispose() {
-    _positionStreamSubscription?.cancel(); // Muista sulkea Stream!
+    _positionStreamSubscription?.cancel();
     _stopSearchController.dispose();
     _sheetController.dispose();
     super.dispose();
@@ -111,7 +112,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     try {
-      // 1. Haetaan ensin nopea aloitus-sijainti
       geo.Position position = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -125,7 +125,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         _mapController.move(_currentLocation, 14.0);
       }
 
-      // 2. KÄYNNISTETÄÄN JATKUVA SEURANTA!
       _startLocationTracking();
     } catch (e) {
       _showSnack('Virhe sijainnin haussa: $e');
@@ -133,14 +132,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   void _startLocationTracking() {
-    // Jos meillä on jo kuuntelija päällä, peruutetaan se ensin
     if (_positionStreamSubscription != null) {
       _positionStreamSubscription!.cancel();
     }
 
     const locationSettings = geo.LocationSettings(
       accuracy: geo.LocationAccuracy.high,
-      distanceFilter: 5, // Päivitä vain, jos liikutaan yli 5 metriä
+      distanceFilter: 5,
     );
 
     _positionStreamSubscription =
@@ -159,16 +157,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   Future<void> _resetToCurrentLocation() async {
     _showSnack('Keskitetään sijaintiin...');
 
-    // Jos seuranta on jostain syystä pois päältä (esim. luvat evättiin aluksi),
-    // yritetään käynnistää se uudelleen.
     if (!_hasRealLocation) {
       await _determinePosition();
     } else {
-      // Jos seuranta on jo päällä, siirretään vain kamera tuoreimpaan sijaintiin.
       _mapController.move(_currentLocation, 15.0);
     }
 
-    // Tyhjennetään hakukenttä ja tehdään haku
     ref.read(startLocationProvider.notifier).state = null;
     ref.read(departureTimeProvider.notifier).state = DateTime.now();
     _triggerSearch();
@@ -179,10 +173,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final dest = ref.read(destinationLocationProvider);
     ref.read(startLocationProvider.notifier).state = dest;
     ref.read(destinationLocationProvider.notifier).state = start;
-    _triggerSearch(); // Ei sulje paneelia automaattisesti
+    _triggerSearch();
   }
 
-  // UUSI LOGIIKKA TÄSSÄ: closePanel-parametri (oletuksena false)
   void _triggerSearch({bool closePanel = false}) {
     final dest = ref.read(destinationLocationProvider);
     if (dest == null) return;
@@ -344,9 +337,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   lat: (stop['lat'] as num).toDouble(),
                   lon: (stop['lon'] as num).toDouble(),
                 );
-                _triggerSearch(
-                  closePanel: true,
-                ); // Sulkee paneelin, jotta nähdään tulokset
+                _triggerSearch(closePanel: true);
               },
             ),
             ListTile(
@@ -416,22 +407,38 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   Future<void> _shareRoute(RouteOption option) async {
-    // 1. Luetaan määränpää ensin Riverpodin tilasta (jos haku juuri tehty)
     final dest = ref.read(destinationLocationProvider);
     String destName = dest?.name ?? '';
 
-    // 2. Jos tila on tyhjä (esim. sovellus juuri avattu ja reitti tuli välimuistista),
-    // haetaan viimeisin tallennettu kohde suoraan laitteen muistista.
     if (destName.isEmpty) {
       final prefs = await SharedPreferences.getInstance();
       destName = prefs.getString('last_dest_name') ?? 'Määränpää';
     }
 
+    final liveState = ref.read(liveBusProvider);
+    DateTime realArrival = option.arrivalTime;
+    if (option.busLegs.isNotEmpty) {
+      final lastLeg = option.busLegs.last;
+      final walkAfterBus = option.arrivalTime.difference(lastLeg.arrivalTime);
+      DateTime lastLegReal = lastLeg.arrivalTime.add(
+        lastLeg.isRealtime
+            ? lastLeg.realtimeDeparture.difference(lastLeg.departureTime)
+            : Duration.zero,
+      );
+      if (liveState.tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
+        final exact = getRealtimeArrivalTime(
+          liveState.tripUpdateFeed,
+          lastLeg,
+          lastLeg.toStopId,
+        );
+        if (exact != null) lastLegReal = exact;
+      }
+      realArrival = lastLegReal.add(walkAfterBus);
+    }
+
     final buf = StringBuffer();
 
-    final totalMinutes = option.arrivalTime
-        .difference(option.leaveHomeTime)
-        .inMinutes;
+    final totalMinutes = realArrival.difference(option.leaveHomeTime).inMinutes;
 
     buf.writeln('🚌 Pohjoisen Reitit');
     buf.writeln('⏱ Matka-aika $totalMinutes min');
@@ -446,8 +453,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       buf.writeln('');
     }
 
-    // Tulostetaan oikea kohde loppuun
-    buf.writeln('🏁 Perillä ${_formatTime(option.arrivalTime)} ($destName)');
+    buf.writeln('🏁 Perillä ${_formatTime(realArrival)} ($destName)');
 
     Clipboard.setData(ClipboardData(text: buf.toString()));
     _showSnack('Reittitiedot kopioitu leikepöydälle!');
@@ -468,7 +474,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       pickedTime.hour,
       pickedTime.minute,
     );
-    _triggerSearch(); // Ei sulje paneelia
+    _triggerSearch();
   }
 
   Future<void> _pickDepartureDate() async {
@@ -488,7 +494,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       current.hour,
       current.minute,
     );
-    _triggerSearch(); // Ei sulje paneelia
+    _triggerSearch();
   }
 
   Future<void> _showSettingsDialog() async {
@@ -558,7 +564,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 Navigator.pop(context);
 
                 if (ref.read(destinationLocationProvider) != null) {
-                  _triggerSearch(); // Ei sulje hakupaneelia, jos se on auki
+                  _triggerSearch();
                 }
               },
               child: const Text('Tallenna'),
@@ -690,9 +696,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       markers.add(
         Marker(
           point: LatLng(pos.latitude, pos.longitude),
-          width: 42, // Nyt markkeri on symmetrinen!
-          height:
-              42, // Korkeus ja leveys ovat samat, jolloin pallo pysyy täydellisesti keskellä
+          width: 42,
+          height: 42,
           child: LiveBusMarker(displayNumber, bearing: busDirection),
         ),
       );
@@ -830,16 +835,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               lon: fav.startLon!,
                             );
                           } else {
-                            // TÄMÄ ON SE KORJAUS: Nollataan lähtöpaikka,
-                            // jotta sovellus käyttää taas automaattisesti GPS:ää!
                             ref.read(startLocationProvider.notifier).state =
                                 null;
                           }
 
                           // 3. Etsitään reitti
-                          _triggerSearch(
-                            closePanel: true,
-                          ); // Suljetaan paneeli jotta reitti näkyy selvästi!
+                          _triggerSearch(closePanel: true);
                         },
                       );
                     },
@@ -886,55 +887,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         const Icon(Icons.trip_origin, color: kWalk, size: 20),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Autocomplete<Place>(
-                            initialValue: TextEditingValue(
-                              text: start?.name ?? '',
-                            ),
-                            optionsBuilder: (textEditingValue) => ref
-                                .read(transitServiceProvider)
-                                .getAutocompleteSuggestions(
-                                  textEditingValue.text,
-                                ),
-                            displayStringForOption: (option) => option.name,
+                          child: _buildLocationAutocomplete(
+                            currentValue: start,
+                            hint: 'Lähtöpiste (tyhjä = GPS)',
                             onSelected: (option) {
                               ref.read(startLocationProvider.notifier).state =
                                   option;
-                              final recent = ref.read(
-                                recentSearchesProvider.notifier,
-                              );
-                              recent.state = [
-                                option,
-                                ...recent.state
-                                    .where((o) => o.name != option.name)
-                                    .take(4),
-                              ];
-                              _triggerSearch(); // Ei sulje paneelia!
                             },
-                            fieldViewBuilder:
-                                (ctx, controller, focusNode, onFieldSubmitted) {
-                                  if (!focusNode.hasFocus &&
-                                      controller.text != (start?.name ?? '')) {
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          if (mounted && !focusNode.hasFocus) {
-                                            controller.text = start?.name ?? '';
-                                          }
-                                        });
-                                  }
-                                  return TextField(
-                                    controller: controller,
-                                    focusNode: focusNode,
-                                    style: const TextStyle(fontSize: 14),
-                                    decoration: const InputDecoration(
-                                      hintText: 'Lähtöpiste (tyhjä = GPS)',
-                                      hintStyle: TextStyle(color: Colors.grey),
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                    ),
-                                  );
-                                },
-                            optionsViewBuilder: _buildAutocompleteOptions,
                           ),
                         ),
                         IconButton(
@@ -1008,59 +967,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Autocomplete<Place>(
-                            initialValue: TextEditingValue(
-                              text: dest?.name ?? '',
-                            ),
-                            optionsBuilder: (textEditingValue) => ref
-                                .read(transitServiceProvider)
-                                .getAutocompleteSuggestions(
-                                  textEditingValue.text,
-                                ),
-                            displayStringForOption: (option) => option.name,
+                          child: _buildLocationAutocomplete(
+                            currentValue: dest,
+                            hint: 'Syötä kohde Oulussa...',
                             onSelected: (option) {
                               ref
-                                      .read(
-                                        destinationLocationProvider.notifier,
-                                      )
-                                      .state =
-                                  option;
-                              final recent = ref.read(
-                                recentSearchesProvider.notifier,
-                              );
-                              recent.state = [
-                                option,
-                                ...recent.state
-                                    .where((o) => o.name != option.name)
-                                    .take(4),
-                              ];
-                              _triggerSearch(); // Ei sulje paneelia!
+                                  .read(destinationLocationProvider.notifier)
+                                  .state = option;
                             },
-                            fieldViewBuilder:
-                                (ctx, controller, focusNode, onFieldSubmitted) {
-                                  if (!focusNode.hasFocus &&
-                                      controller.text != (dest?.name ?? '')) {
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          if (mounted && !focusNode.hasFocus) {
-                                            controller.text = dest?.name ?? '';
-                                          }
-                                        });
-                                  }
-                                  return TextField(
-                                    controller: controller,
-                                    focusNode: focusNode,
-                                    style: const TextStyle(fontSize: 14),
-                                    decoration: const InputDecoration(
-                                      hintText: 'Syötä kohde Oulussa...',
-                                      hintStyle: TextStyle(color: Colors.grey),
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                    ),
-                                  );
-                                },
-                            optionsViewBuilder: _buildAutocompleteOptions,
                           ),
                         ),
                         isLoading
@@ -1075,7 +989,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                   ),
                                 ),
                               )
-                            // SUURENNUSLASI: Tämä on ainoa nappi hakupaneelissa, joka pakottaa paneelin kiinni!
                             : IconButton(
                                 icon: const Icon(
                                   Icons.search,
@@ -1226,6 +1139,52 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
+  Widget _buildLocationAutocomplete({
+    required Place? currentValue,
+    required String hint,
+    required ValueChanged<Place> onSelected,
+  }) {
+    return Autocomplete<Place>(
+      initialValue: TextEditingValue(text: currentValue?.name ?? ''),
+      optionsBuilder: (textEditingValue) => ref
+          .read(transitServiceProvider)
+          .getAutocompleteSuggestions(textEditingValue.text),
+      displayStringForOption: (option) => option.name,
+      onSelected: (option) {
+        onSelected(option);
+        final recent = ref.read(recentSearchesProvider.notifier);
+        recent.state = [
+          option,
+          ...recent.state.where((o) => o.name != option.name).take(4),
+        ];
+        _triggerSearch();
+      },
+      fieldViewBuilder: (ctx, controller, focusNode, onFieldSubmitted) {
+        if (!focusNode.hasFocus &&
+            controller.text != (currentValue?.name ?? '')) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && !focusNode.hasFocus) {
+              controller.text = currentValue?.name ?? '';
+            }
+          });
+        }
+        return TextField(
+          controller: controller,
+          focusNode: focusNode,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: const TextStyle(color: Colors.grey),
+            border: InputBorder.none,
+            isDense: true,
+            contentPadding: EdgeInsets.zero,
+          ),
+        );
+      },
+      optionsViewBuilder: _buildAutocompleteOptions,
+    );
+  }
+
   Widget _buildAutocompleteOptions(
     BuildContext context,
     AutocompleteOnSelected<Place> onSelected,
@@ -1339,6 +1298,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
     final double minSheetSize = (45.0 / screenHeight).clamp(0.1, 0.3);
 
+    // Pomminvarma Live-sääntö: Jos yhteys on auki, valo palaa.
+    final bool isLiveConnected =
+        !state.isOffline && liveState.tripUpdateFeed != null;
+
     return AnimatedPadding(
       duration: const Duration(milliseconds: 150),
       padding: EdgeInsets.only(bottom: keyboardHeight),
@@ -1402,102 +1365,113 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                           ),
                         ),
                         const Spacer(),
-                        GestureDetector(
-                          onTap: _showFavoritesSheet,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 5,
-                            ),
-                            decoration: BoxDecoration(
-                              color: favs.isNotEmpty
-                                  ? kAccent.withValues(alpha: 0.15)
-                                  : kSurface,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                color: favs.isNotEmpty
-                                    ? kAccent.withValues(alpha: 0.5)
-                                    : Colors.transparent,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.star_rounded,
-                                  size: 16,
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (isLiveConnected) ...[
+                              const LiveIndicator(),
+                              const SizedBox(width: 12),
+                            ],
+                            GestureDetector(
+                              onTap: _showFavoritesSheet,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
                                   color: favs.isNotEmpty
-                                      ? kAccent
-                                      : Colors.grey,
+                                      ? kAccent.withValues(alpha: 0.15)
+                                      : kSurface,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: favs.isNotEmpty
+                                        ? kAccent.withValues(alpha: 0.5)
+                                        : Colors.transparent,
+                                  ),
                                 ),
-                                if (favs.isNotEmpty) ...[
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    '${favs.length}',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFF996600),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.star_rounded,
+                                      size: 16,
+                                      color: favs.isNotEmpty
+                                          ? kAccent
+                                          : Colors.grey,
                                     ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        if (state.isOffline)
-                          Container(
-                            margin: const EdgeInsets.only(right: 8),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.orange.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.wifi_off,
-                                  size: 12,
-                                  color: Colors.orange,
+                                    if (favs.isNotEmpty) ...[
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '${favs.length}',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: Color(0xFF996600),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
                                 ),
-                                SizedBox(width: 4),
-                                Text(
-                                  'Offline',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.orange,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        if (state.options.isNotEmpty)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: kPrimary.withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${state.options.length} kpl',
-                              style: const TextStyle(
-                                color: kPrimary,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 8),
+                            if (state.isOffline)
+                              Container(
+                                margin: const EdgeInsets.only(right: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.wifi_off,
+                                      size: 12,
+                                      color: Colors.orange,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'Offline',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.orange,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (state.options.isNotEmpty)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: kPrimary.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  '${state.options.length} kpl',
+                                  style: const TextStyle(
+                                    color: kPrimary,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
+                  const Divider(height: 1, color: Color(0xFFEEEEEE)),
+                  const SizedBox(height: 8),
                   if (state.isLoading)
                     for (int i = 0; i < 3; i++) const ShimmerCard(),
                   if (!state.isLoading)
@@ -1509,8 +1483,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         isOfflineData: state.isOffline,
                         formatTime: _formatTime,
                         liveFeed: liveState.feed,
-                        tripUpdateFeed:
-                            liveState.tripUpdateFeed, // LISÄÄ TÄMÄ RIVI!
+                        tripUpdateFeed: liveState.tripUpdateFeed,
                         onTap: () {
                           ref.read(routeStateProvider.notifier).selectRoute(i);
                           _zoomToRoute(state.options, i);
@@ -1539,9 +1512,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final screenHeight = MediaQuery.of(context).size.height;
-    final double minSheetSize = (45.0 / screenHeight).clamp(0.1, 0.3);
-
     final routeState = ref.watch(routeStateProvider);
     final liveState = ref.watch(liveBusProvider);
     final startLoc = ref.watch(startLocationProvider);
@@ -1735,13 +1705,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         systemNavigationBarColor: Colors.white,
-        systemNavigationBarDividerColor:
-            Colors.transparent, // Poistaa mahdollisen harmaan rajan
+        systemNavigationBarDividerColor: Colors.transparent,
         systemNavigationBarIconBrightness: Brightness.dark,
       ),
       child: Scaffold(
-        backgroundColor: Colors
-            .white, // TÄMÄ tekee navigaatiopalkin takana olevasta tilasta valkoisen
+        backgroundColor: Colors.white,
         resizeToAvoidBottomInset: true,
         appBar: AppBar(
           toolbarHeight: 52,
@@ -1793,7 +1761,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   _isCollapsingSheet = true;
                   _sheetController
                       .animateTo(
-                        minSheetSize,
+                        0.3, // Minimoitu koko
                         duration: const Duration(milliseconds: 280),
                         curve: Curves.easeInOut,
                       )
@@ -1859,7 +1827,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           ],
         ),
         body: SafeArea(
-          // TÄMÄ estää karttaa valumasta navigaatiopalkin alle
           bottom: true,
           top: false,
           left: false,
