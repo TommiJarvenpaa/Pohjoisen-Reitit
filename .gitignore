@@ -53,6 +53,10 @@ key.properties
 google-services.json
 GoogleService-Info.plist
 
+# Local documentation
+APP_SUMMARY.md
+CLAUDE.md
+
 # Missing Flutter tooling files
 .flutter-plugins
 
