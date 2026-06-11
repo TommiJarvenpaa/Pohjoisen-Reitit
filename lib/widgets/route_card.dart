@@ -1,271 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
-import 'package:latlong2/latlong.dart';
 import '../models/app_models.dart';
+import '../services/realtime_utils.dart';
 import '../theme/app_colors.dart';
 import '../widgets/trip_route_sheet.dart';
-
-/// Poistaa namespace-etuliitteen ("waltti:", "HSL:" jne.) ja
-/// päivämääräsuffiksin ("_20240330") trip ID:stä vertailua varten.
-/// Estää osittaiset osumat, esim. "100123456" ei osu "1001234567":ään.
-String _tripCore(String tripId) {
-  String id = tripId.contains(':') ? tripId.split(':').last : tripId;
-  if (id.contains('_')) id = id.split('_').first;
-  return id;
-}
-
-bool _tripIdMatches(String feedTripId, String legTripId) {
-  if (feedTripId == legTripId) return true;
-  return _tripCore(feedTripId) == _tripCore(legTripId);
-}
-
-DateTime? _findStopTime(
-  FeedMessage? tripUpdateFeed,
-  BusLeg leg,
-  String stopId, {
-  required bool preferDeparture,
-}) {
-  if (tripUpdateFeed == null || leg.tripId.isEmpty) return null;
-
-  for (final entity in tripUpdateFeed.entity) {
-    if (!entity.hasTripUpdate()) continue;
-    final tripUpdate = entity.tripUpdate;
-    final tripId = tripUpdate.trip.tripId;
-    if (tripId.isEmpty) continue;
-
-    if (!_tripIdMatches(tripId, leg.tripId)) continue;
-
-    for (final stu in tripUpdate.stopTimeUpdate) {
-      if (!stu.hasStopId()) continue;
-      final updateStopId = stu.stopId;
-      final bool stopMatches =
-          updateStopId == stopId ||
-          stopId.endsWith(':$updateStopId') ||
-          stopId == updateStopId;
-      if (!stopMatches) continue;
-
-      final first = preferDeparture
-          ? (stu.hasDeparture() && stu.departure.hasTime()
-              ? DateTime.fromMillisecondsSinceEpoch(stu.departure.time.toInt() * 1000)
-              : null)
-          : (stu.hasArrival() && stu.arrival.hasTime()
-              ? DateTime.fromMillisecondsSinceEpoch(stu.arrival.time.toInt() * 1000)
-              : null);
-      if (first != null) return first;
-
-      final second = preferDeparture
-          ? (stu.hasArrival() && stu.arrival.hasTime()
-              ? DateTime.fromMillisecondsSinceEpoch(stu.arrival.time.toInt() * 1000)
-              : null)
-          : (stu.hasDeparture() && stu.departure.hasTime()
-              ? DateTime.fromMillisecondsSinceEpoch(stu.departure.time.toInt() * 1000)
-              : null);
-      if (second != null) return second;
-    }
-  }
-  return null;
-}
-
-DateTime? getRealtimeStopTime(
-  FeedMessage? tripUpdateFeed,
-  BusLeg leg,
-  String stopId,
-) => _findStopTime(tripUpdateFeed, leg, stopId, preferDeparture: true);
-
-DateTime? getRealtimeArrivalTime(
-  FeedMessage? tripUpdateFeed,
-  BusLeg leg,
-  String stopId,
-) => _findStopTime(tripUpdateFeed, leg, stopId, preferDeparture: false);
-
-String _getStopTime(
-  int index,
-  BusLeg leg,
-  FeedMessage? tripUpdateFeed,
-  String Function(DateTime) fmt,
-) {
-  if (tripUpdateFeed != null && leg.legStopIds.length > index + 1) {
-    final String stopId = leg.legStopIds[index + 1];
-    final DateTime? exactTime = getRealtimeStopTime(
-      tripUpdateFeed,
-      leg,
-      stopId,
-    );
-
-    if (exactTime != null) {
-      return fmt(exactTime);
-    }
-  }
-
-  final Duration delay = leg.isRealtime
-      ? leg.realtimeDeparture.difference(leg.departureTime)
-      : Duration.zero;
-
-  final Duration total = leg.arrivalTime.difference(leg.departureTime);
-  final int count = leg.intermediateStops.length + 1;
-
-  if (count <= 0) {
-    return fmt(leg.realtimeDeparture);
-  }
-
-  final int secs = ((index + 1) * total.inSeconds / count).round();
-  final DateTime scheduledT = leg.departureTime.add(Duration(seconds: secs));
-  final DateTime realtimeT = scheduledT.add(delay);
-
-  return fmt(realtimeT);
-}
-
-int? getRealtimeCurrentStopIndex(FeedMessage? feed, BusLeg leg) {
-  if (feed == null || leg.tripId.isEmpty || leg.legStopIds.isEmpty) {
-    return null;
-  }
-
-  for (final entity in feed.entity) {
-    if (!entity.hasVehicle()) {
-      continue;
-    }
-
-    final vehicle = entity.vehicle;
-
-    if (!vehicle.hasTrip()) {
-      continue;
-    }
-
-    final trip = vehicle.trip;
-    final tripId = trip.tripId;
-
-    if (tripId.isEmpty) {
-      continue;
-    }
-
-    if (!_tripIdMatches(tripId, leg.tripId)) continue;
-
-    final routeId = trip.routeId;
-    final legRoute = leg.routeGtfsId;
-    final routeMatches =
-        legRoute.isEmpty ||
-        routeId == legRoute ||
-        routeId.endsWith(':${leg.busNumber}') ||
-        routeId == leg.busNumber;
-
-    if (!routeMatches) {
-      continue;
-    }
-
-    if (!vehicle.hasStopId()) {
-      if (vehicle.hasPosition()) {
-        final posLat = vehicle.position.latitude.toDouble();
-        final posLon = vehicle.position.longitude.toDouble();
-        const distCalc = Distance();
-
-        final List<LatLng> coords = [];
-
-        if (leg.fromLat != null && leg.fromLon != null) {
-          coords.add(LatLng(leg.fromLat!, leg.fromLon!));
-        }
-
-        for (var s in leg.intermediateStops) {
-          coords.add(LatLng(s.lat, s.lon));
-        }
-
-        if (leg.toLat != null && leg.toLon != null) {
-          coords.add(LatLng(leg.toLat!, leg.toLon!));
-        }
-
-        if (coords.isNotEmpty) {
-          List<double> distances = [];
-          double bestDist = double.infinity;
-          int closestIdx = -1;
-
-          for (int i = 0; i < coords.length; i++) {
-            double d = distCalc.as(
-              LengthUnit.Meter,
-              coords[i],
-              LatLng(posLat, posLon),
-            );
-            distances.add(d);
-
-            if (d < bestDist) {
-              bestDist = d;
-              closestIdx = i;
-            }
-          }
-
-          if (closestIdx >= 0 && bestDist < 1500) {
-            int assignedIdx = closestIdx;
-
-            if (bestDist > 75) {
-              double distBefore = closestIdx > 0
-                  ? distances[closestIdx - 1]
-                  : double.infinity;
-              double distAfter = closestIdx < distances.length - 1
-                  ? distances[closestIdx + 1]
-                  : double.infinity;
-
-              if (distAfter < distBefore) {
-                assignedIdx = closestIdx + 1;
-              } else {
-                assignedIdx = closestIdx;
-              }
-            }
-            return assignedIdx;
-          }
-        }
-      }
-      return null;
-    }
-
-    final stopId = vehicle.stopId;
-    int idx = leg.legStopIds.indexOf(stopId);
-
-    if (idx == -1) {
-      idx = leg.legStopIds.indexWhere((id) {
-        return id.endsWith(':$stopId') || id == stopId;
-      });
-    }
-
-    if (idx >= 0) {
-      return idx;
-    }
-  }
-  return null;
-}
-
-int _transferLatenessMinutes(
-  BusLeg prevLeg,
-  BusLeg nextLeg,
-  FeedMessage? tripUpdateFeed,
-) {
-  DateTime prevArrival = prevLeg.arrivalTime.add(
-    prevLeg.isRealtime
-        ? prevLeg.realtimeDeparture.difference(prevLeg.departureTime)
-        : Duration.zero,
-  );
-  if (tripUpdateFeed != null && prevLeg.toStopId.isNotEmpty) {
-    final exact = getRealtimeArrivalTime(
-      tripUpdateFeed,
-      prevLeg,
-      prevLeg.toStopId,
-    );
-    if (exact != null) {
-      prevArrival = exact;
-    }
-  }
-
-  DateTime nextDeparture = nextLeg.realtimeDeparture;
-  if (tripUpdateFeed != null && nextLeg.fromStopId.isNotEmpty) {
-    final exact = getRealtimeStopTime(
-      tripUpdateFeed,
-      nextLeg,
-      nextLeg.fromStopId,
-    );
-    if (exact != null) {
-      nextDeparture = exact;
-    }
-  }
-
-  return prevArrival.difference(nextDeparture).inMinutes;
-}
 
 // --- PÄÄKORTTI ---
 class RouteCard extends StatefulWidget {
@@ -319,8 +57,12 @@ class _RouteCardState extends State<RouteCard> {
       );
     }
 
+    // Offline-välimuistista ladatulta reitiltä kävelymatkat voivat
+    // puuttua kokonaan, joten indeksit on tarkistettava.
+    final walkDistances = widget.option.walkDistances;
+
     for (int i = 0; i < widget.option.busLegs.length; i++) {
-      if (widget.option.walkDistances[i] > 0) {
+      if (i < walkDistances.length && walkDistances[i] > 0) {
         items.add(const Icon(Icons.directions_walk, size: 16, color: kWalk));
         items.add(const SizedBox(width: 4));
         items.add(
@@ -341,8 +83,7 @@ class _RouteCardState extends State<RouteCard> {
       );
 
       if (i < widget.option.busLegs.length - 1 ||
-          (i + 1 < widget.option.walkDistances.length &&
-              widget.option.walkDistances[i + 1] > 0)) {
+          (i + 1 < walkDistances.length && walkDistances[i + 1] > 0)) {
         items.add(const SizedBox(width: 4));
         items.add(
           const Icon(
@@ -355,7 +96,7 @@ class _RouteCardState extends State<RouteCard> {
       }
     }
 
-    if (widget.option.walkDistances.last > 0) {
+    if (walkDistances.isNotEmpty && walkDistances.last > 0) {
       items.add(const Icon(Icons.directions_walk, size: 16, color: kWalk));
       items.add(const SizedBox(width: 4));
       items.add(
@@ -378,33 +119,12 @@ class _RouteCardState extends State<RouteCard> {
         .expand((leg) => leg.alerts)
         .toList();
 
-    DateTime realArrivalTime = widget.option.arrivalTime;
-    if (widget.option.busLegs.isNotEmpty) {
-      final lastLeg = widget.option.busLegs.last;
-      final Duration walkAfterBus = widget.option.arrivalTime.difference(
-        lastLeg.arrivalTime,
-      );
+    final DateTime realArrival = realArrivalTime(
+      widget.option,
+      widget.tripUpdateFeed,
+    );
 
-      DateTime lastLegRealArrival = lastLeg.arrivalTime.add(
-        lastLeg.isRealtime
-            ? lastLeg.realtimeDeparture.difference(lastLeg.departureTime)
-            : Duration.zero,
-      );
-
-      if (widget.tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
-        final exactTime = getRealtimeArrivalTime(
-          widget.tripUpdateFeed,
-          lastLeg,
-          lastLeg.toStopId,
-        );
-        if (exactTime != null) {
-          lastLegRealArrival = exactTime;
-        }
-      }
-      realArrivalTime = lastLegRealArrival.add(walkAfterBus);
-    }
-
-    final totalMinutes = realArrivalTime
+    final totalMinutes = realArrival
         .difference(widget.option.leaveHomeTime)
         .inMinutes;
 
@@ -471,7 +191,7 @@ class _RouteCardState extends State<RouteCard> {
         );
       } else if (i + 1 < widget.option.busLegs.length) {
         final nextLeg = widget.option.busLegs[i + 1];
-        final int lateness = _transferLatenessMinutes(
+        final int lateness = transferLatenessMinutes(
           leg,
           nextLeg,
           widget.tripUpdateFeed,
@@ -674,7 +394,7 @@ class _RouteCardState extends State<RouteCard> {
                     ),
                   ),
                   Text(
-                    widget.formatTime(realArrivalTime),
+                    widget.formatTime(realArrival),
                     style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w800,
@@ -808,7 +528,7 @@ class _RouteCardState extends State<RouteCard> {
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                'Perillä klo ${widget.formatTime(realArrivalTime)}',
+                                'Perillä klo ${widget.formatTime(realArrival)}',
                                 style: const TextStyle(
                                   fontWeight: FontWeight.w700,
                                   fontSize: 14,
@@ -940,6 +660,9 @@ class _BusLegSectionState extends State<BusLegSection> {
     final bool hasIntermediateStops = leg.intermediateStops.isNotEmpty;
 
     DateTime realtimeDep = leg.realtimeDeparture;
+    // Reaaliaikatieto voi tulla hakuhetken tilannekuvan lisäksi myös
+    // live-feedistä – esim. vaihtobussit eivät ole tilannekuvassa mukana.
+    bool hasRealtimeDep = leg.isRealtime;
     if (widget.tripUpdateFeed != null && leg.fromStopId.isNotEmpty) {
       final exactDep = getRealtimeStopTime(
         widget.tripUpdateFeed,
@@ -948,17 +671,18 @@ class _BusLegSectionState extends State<BusLegSection> {
       );
       if (exactDep != null) {
         realtimeDep = exactDep;
+        hasRealtimeDep = true;
       }
     }
 
     final bool hasDelay =
-        leg.isRealtime &&
+        hasRealtimeDep &&
         realtimeDep.difference(leg.departureTime).inMinutes != 0;
     final int delayMin = realtimeDep.difference(leg.departureTime).inMinutes;
 
     DateTime finalBusArrivalTime = leg.arrivalTime.add(
-      leg.isRealtime
-          ? leg.realtimeDeparture.difference(leg.departureTime)
+      hasRealtimeDep
+          ? realtimeDep.difference(leg.departureTime)
           : Duration.zero,
     );
     if (widget.tripUpdateFeed != null && leg.toStopId.isNotEmpty) {
@@ -1162,7 +886,7 @@ class _BusLegSectionState extends State<BusLegSection> {
                                             ),
                                           ),
                                           Text(
-                                            _getStopTime(
+                                            intermediateStopTimeLabel(
                                               i,
                                               leg,
                                               widget.tripUpdateFeed,

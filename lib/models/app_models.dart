@@ -81,6 +81,7 @@ class StopTimeData {
   final String? busNumber;
   final String? headsign;
   final String tripId;
+  final String routeGtfsId;
 
   StopTimeData({
     required this.scheduledEpochSec,
@@ -90,6 +91,7 @@ class StopTimeData {
     this.busNumber,
     this.headsign,
     this.tripId = '',
+    this.routeGtfsId = '',
   });
 }
 
@@ -137,6 +139,52 @@ class BusLeg {
     this.intermediateStops = const [],
     this.alerts = const [],
   });
+
+  BusLeg copyWith({
+    String? busNumber,
+    String? routeGtfsId,
+    String? tripId,
+    String? fromStop,
+    String? fromStopId,
+    String? toStopId,
+    List<String>? legStopIds,
+    double? fromLat,
+    double? fromLon,
+    String? toStop,
+    double? toLat,
+    double? toLon,
+    DateTime? departureTime,
+    DateTime? arrivalTime,
+    DateTime? realtimeDeparture,
+    String? realtimeState,
+    bool? isRealtime,
+    bool? stayOnBus,
+    List<IntermediateStop>? intermediateStops,
+    List<AlertInfo>? alerts,
+  }) {
+    return BusLeg(
+      busNumber: busNumber ?? this.busNumber,
+      routeGtfsId: routeGtfsId ?? this.routeGtfsId,
+      tripId: tripId ?? this.tripId,
+      fromStop: fromStop ?? this.fromStop,
+      fromStopId: fromStopId ?? this.fromStopId,
+      toStopId: toStopId ?? this.toStopId,
+      legStopIds: legStopIds ?? this.legStopIds,
+      fromLat: fromLat ?? this.fromLat,
+      fromLon: fromLon ?? this.fromLon,
+      toStop: toStop ?? this.toStop,
+      toLat: toLat ?? this.toLat,
+      toLon: toLon ?? this.toLon,
+      departureTime: departureTime ?? this.departureTime,
+      arrivalTime: arrivalTime ?? this.arrivalTime,
+      realtimeDeparture: realtimeDeparture ?? this.realtimeDeparture,
+      realtimeState: realtimeState ?? this.realtimeState,
+      isRealtime: isRealtime ?? this.isRealtime,
+      stayOnBus: stayOnBus ?? this.stayOnBus,
+      intermediateStops: intermediateStops ?? this.intermediateStops,
+      alerts: alerts ?? this.alerts,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'busNumber': busNumber,
@@ -319,5 +367,14 @@ class FavoriteRoute {
       return '$startName → $dest';
     }
     return '📍 → $dest';
+  }
+
+  /// Tunnistaa suosikin nimen JA koordinaattien perusteella, jotta kaksi
+  /// samannimistä kohdetta (esim. kaksi K-Markettia) eivät mene sekaisin.
+  /// Toleranssi ~50 m kattaa geokoodauksen pyöristyserot.
+  bool isSameDestination(Place place) {
+    return destinationName == place.name &&
+        (destLat - place.lat).abs() < 0.0005 &&
+        (destLon - place.lon).abs() < 0.0005;
   }
 }

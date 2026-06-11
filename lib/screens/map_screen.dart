@@ -6,12 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart' as geo;
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme/app_colors.dart';
 import '../models/app_models.dart';
 import '../providers/app_providers.dart';
+import '../services/realtime_utils.dart';
 import '../widgets/shimmer_widgets.dart';
 import '../widgets/map_markers.dart';
 import '../widgets/live_indicator.dart';
@@ -37,6 +37,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   List<Marker> _stopMarkers = [];
   bool _isFetchingStops = false;
   String _stopSearchQuery = '';
+  String _lastAutocompleteInput = '';
   final TextEditingController _stopSearchController = TextEditingController();
   StreamSubscription<geo.Position>? _positionStreamSubscription;
   final DraggableScrollableController _sheetController =
@@ -364,7 +365,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final stopLat = (stop['lat'] as num).toDouble();
     final stopLon = (stop['lon'] as num).toDouble();
     final stopName = stop['name'] as String? ?? '';
-    final key = dotenv.env['DIGITRANSIT_KEY'] ?? '';
 
     showModalBottomSheet(
       context: context,
@@ -380,7 +380,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         builder: (ctx2, scrollController) => StopBoardSheet(
           stopId: stop['gtfsId'] ?? '',
           stopName: stopName,
-          digitransitKey: key,
           formatTime: _formatTime,
           scrollController: scrollController,
           onSetAsStart: () {
@@ -416,25 +415,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     final liveState = ref.read(liveBusProvider);
-    DateTime realArrival = option.arrivalTime;
-    if (option.busLegs.isNotEmpty) {
-      final lastLeg = option.busLegs.last;
-      final walkAfterBus = option.arrivalTime.difference(lastLeg.arrivalTime);
-      DateTime lastLegReal = lastLeg.arrivalTime.add(
-        lastLeg.isRealtime
-            ? lastLeg.realtimeDeparture.difference(lastLeg.departureTime)
-            : Duration.zero,
-      );
-      if (liveState.tripUpdateFeed != null && lastLeg.toStopId.isNotEmpty) {
-        final exact = getRealtimeArrivalTime(
-          liveState.tripUpdateFeed,
-          lastLeg,
-          lastLeg.toStopId,
-        );
-        if (exact != null) lastLegReal = exact;
-      }
-      realArrival = lastLegReal.add(walkAfterBus);
-    }
+    // Sama laskenta kuin reittikortissa, jotta jaettu aika ei eroa näytöstä.
+    final DateTime realArrival = realArrivalTime(
+      option,
+      liveState.tripUpdateFeed,
+    );
 
     final buf = StringBuffer();
 
@@ -618,7 +603,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     LiveBusState liveState,
     RouteState routeState,
   ) {
-    if (liveState.feed == null || !liveState.isActive) {
+    // Vanhentuneet sijainnit piilotetaan mieluummin kuin näytetään
+    // busseja paikoissa, joissa ne eivät enää ole.
+    if (!liveState.isActive || !liveState.hasFreshPositions) {
       return [];
     }
 
@@ -1139,6 +1126,22 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
+  /// Debounce: odotetaan hetki ja hylätään kysely, jos käyttäjä ehti
+  /// jatkaa kirjoittamista. Säästää API-kutsut yhteen per kirjoitustauko.
+  Future<Iterable<Place>> _autocompleteOptions(
+    TextEditingValue textEditingValue,
+  ) async {
+    final text = textEditingValue.text.trim();
+    _lastAutocompleteInput = text;
+    if (text.length < 2) return const Iterable<Place>.empty();
+
+    await Future.delayed(const Duration(milliseconds: 350));
+    if (!mounted || text != _lastAutocompleteInput) {
+      return const Iterable<Place>.empty();
+    }
+    return ref.read(transitServiceProvider).getAutocompleteSuggestions(text);
+  }
+
   Widget _buildLocationAutocomplete({
     required Place? currentValue,
     required String hint,
@@ -1146,17 +1149,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }) {
     return Autocomplete<Place>(
       initialValue: TextEditingValue(text: currentValue?.name ?? ''),
-      optionsBuilder: (textEditingValue) => ref
-          .read(transitServiceProvider)
-          .getAutocompleteSuggestions(textEditingValue.text),
+      optionsBuilder: _autocompleteOptions,
       displayStringForOption: (option) => option.name,
       onSelected: (option) {
         onSelected(option);
-        final recent = ref.read(recentSearchesProvider.notifier);
-        recent.state = [
-          option,
-          ...recent.state.where((o) => o.name != option.name).take(4),
-        ];
+        ref.read(recentSearchesProvider.notifier).add(option);
         _triggerSearch();
       },
       fieldViewBuilder: (ctx, controller, focusNode, onFieldSubmitted) {
@@ -1291,16 +1288,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final liveState = ref.watch(liveBusProvider);
     final favs = ref.watch(favoritesProvider);
     final dest = ref.watch(destinationLocationProvider);
-    final isFav =
-        dest != null && favs.any((f) => f.destinationName == dest.name);
+    final isFav = dest != null && favs.any((f) => f.isSameDestination(dest));
 
     final screenHeight = MediaQuery.of(context).size.height;
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
     final double minSheetSize = (45.0 / screenHeight).clamp(0.1, 0.3);
 
-    // Pomminvarma Live-sääntö: Jos yhteys on auki, valo palaa.
+    // Live-valo palaa vain, kun viimeisin haku on oikeasti onnistunut
+    // hiljattain – vanhentunut feed ei sammuta valoa muuten.
     final bool isLiveConnected =
-        !state.isOffline && liveState.tripUpdateFeed != null;
+        !state.isOffline && liveState.hasFreshTripUpdates;
 
     return AnimatedPadding(
       duration: const Duration(milliseconds: 150),
@@ -1472,6 +1469,54 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   ),
                   const Divider(height: 1, color: Color(0xFFEEEEEE)),
                   const SizedBox(height: 8),
+                  if (!state.isLoading && state.errorMessage != null)
+                    Container(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: kDelayed.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: kDelayed.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.error_outline,
+                                color: kDelayed,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  state.errorMessage!,
+                                  style: const TextStyle(
+                                    color: kDelayed,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: _triggerSearch,
+                              icon: const Icon(Icons.refresh, size: 16),
+                              label: const Text('Yritä uudelleen'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   if (state.isLoading)
                     for (int i = 0; i < 3; i++) const ShimmerCard(),
                   if (!state.isLoading)
@@ -1647,7 +1692,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (_showBusStops) {
       stackChildren.add(
         Positioned(
-          bottom: (routeState.options.isNotEmpty || routeState.isLoading)
+          bottom:
+              (routeState.options.isNotEmpty ||
+                  routeState.isLoading ||
+                  routeState.errorMessage != null)
               ? 270
               : 80,
           left: 16,
@@ -1698,7 +1746,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       );
     }
 
-    if (routeState.options.isNotEmpty || routeState.isLoading) {
+    if (routeState.options.isNotEmpty ||
+        routeState.isLoading ||
+        routeState.errorMessage != null) {
       stackChildren.add(_buildRouteSheet());
     }
 

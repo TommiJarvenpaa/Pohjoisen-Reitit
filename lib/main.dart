@@ -8,7 +8,13 @@ import 'screens/map_screen.dart'; // Tämän luomme seuraavassa viestissä
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: ".env");
+  try {
+    await dotenv.load(fileName: ".env");
+  } catch (e) {
+    // Ilman .env-tiedostoa API-avaimet puuttuvat ja haut epäonnistuvat,
+    // mutta sovellus käynnistyy silti ja virheet näkyvät käyttöliittymässä.
+    debugPrint('.env-tiedoston lataus epäonnistui: $e');
+  }
 
   // Asetetaan Androidin navigaatiopalkki valkoiseksi ja sen ikonit tummiksi
   SystemChrome.setSystemUIOverlayStyle(

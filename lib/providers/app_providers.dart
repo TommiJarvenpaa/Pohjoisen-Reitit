@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
@@ -9,11 +10,13 @@ import '../services/transit_service.dart';
 
 // Service provider
 final transitServiceProvider = Provider((ref) {
-  return TransitService(
+  final service = TransitService(
     digitransitKey: dotenv.env['DIGITRANSIT_KEY'] ?? '',
     walttiClientId: dotenv.env['WALTTI_CLIENT_ID'] ?? '',
     walttiClientSecret: dotenv.env['WALTTI_CLIENT_SECRET'] ?? '',
   );
+  ref.onDispose(service.dispose);
+  return service;
 });
 
 // Asetukset
@@ -68,8 +71,48 @@ final walkSpeedProvider = StateNotifierProvider<WalkSpeedNotifier, double>((
   return WalkSpeedNotifier();
 });
 
-// Historia
-final recentSearchesProvider = StateProvider<List<Place>>((ref) => []);
+// Historia – säilyy uudelleenkäynnistysten yli kuten suosikit ja asetukset.
+class RecentSearchesNotifier extends StateNotifier<List<Place>> {
+  RecentSearchesNotifier() : super(const []) {
+    _load();
+  }
+
+  static const String _prefsKey = 'recent_searches';
+  static const int _maxEntries = 5;
+
+  Future<void> _load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_prefsKey) ?? [];
+      state = raw
+          .map((s) => Place.fromJson(json.decode(s) as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      debugPrint('Failed to load recent searches: $e');
+    }
+  }
+
+  Future<void> add(Place place) async {
+    state = [
+      place,
+      ...state.where((o) => o.name != place.name),
+    ].take(_maxEntries).toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        _prefsKey,
+        state.map((p) => json.encode(p.toJson())).toList(),
+      );
+    } catch (e) {
+      debugPrint('Failed to save recent searches: $e');
+    }
+  }
+}
+
+final recentSearchesProvider =
+    StateNotifierProvider<RecentSearchesNotifier, List<Place>>((ref) {
+      return RecentSearchesNotifier();
+    });
 
 // Sijainnit ja haun tila
 final startLocationProvider = StateProvider<Place?>((ref) => null);
@@ -83,11 +126,16 @@ class RouteState {
   final bool isOffline;
   final int selectedIndex;
 
+  /// Käyttäjälle näytettävä virheilmoitus. Erottaa "ei reittejä löytynyt"
+  /// -tilanteen verkkovirheestä.
+  final String? errorMessage;
+
   RouteState({
     this.options = const [],
     this.isLoading = false,
     this.isOffline = false,
     this.selectedIndex = 0,
+    this.errorMessage,
   });
 
   RouteState copyWith({
@@ -95,12 +143,15 @@ class RouteState {
     bool? isLoading,
     bool? isOffline,
     int? selectedIndex,
+    String? errorMessage,
+    bool clearError = false,
   }) {
     return RouteState(
       options: options ?? this.options,
       isLoading: isLoading ?? this.isLoading,
       isOffline: isOffline ?? this.isOffline,
       selectedIndex: selectedIndex ?? this.selectedIndex,
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     );
   }
 }
@@ -129,7 +180,7 @@ class RouteNotifier extends StateNotifier<RouteState> {
     double speedKmH, {
     Place? destPlace,
   }) async {
-    state = state.copyWith(isLoading: true, isOffline: false);
+    state = state.copyWith(isLoading: true, isOffline: false, clearError: true);
     try {
       final double walkSpeedMS = speedKmH / 3.6;
       final options = await _api.fetchRoutes(
@@ -141,6 +192,7 @@ class RouteNotifier extends StateNotifier<RouteState> {
         transferTime,
         walkSpeedMS,
       );
+      if (!mounted) return;
       state = state.copyWith(
         isLoading: false,
         options: options,
@@ -149,8 +201,21 @@ class RouteNotifier extends StateNotifier<RouteState> {
       if (options.isNotEmpty && destPlace != null) {
         _saveOfflineCache(options, destPlace);
       }
+    } on TimeoutException {
+      if (!mounted) return;
+      state = state.copyWith(
+        isLoading: false,
+        errorMessage:
+            'Reittihaku aikakatkaistiin. Tarkista verkkoyhteys ja yritä uudelleen.',
+      );
     } catch (e) {
-      state = state.copyWith(isLoading: false);
+      debugPrint('Route search failed: $e');
+      if (!mounted) return;
+      state = state.copyWith(
+        isLoading: false,
+        errorMessage:
+            'Reittihaku epäonnistui. Tarkista verkkoyhteys ja yritä uudelleen.',
+      );
     }
   }
 
@@ -173,14 +238,18 @@ class RouteNotifier extends StateNotifier<RouteState> {
   }
 
   Future<void> _saveOfflineCache(List<RouteOption> options, Place dest) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'last_route_options',
-      json.encode(options.map((r) => r.toJson()).toList()),
-    );
-    await prefs.setString('last_dest_name', dest.name);
-    await prefs.setDouble('last_dest_lat', dest.lat);
-    await prefs.setDouble('last_dest_lon', dest.lon);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'last_route_options',
+        json.encode(options.map((r) => r.toJson()).toList()),
+      );
+      await prefs.setString('last_dest_name', dest.name);
+      await prefs.setDouble('last_dest_lat', dest.lat);
+      await prefs.setDouble('last_dest_lon', dest.lon);
+    } catch (e) {
+      debugPrint('Failed to save offline cache: $e');
+    }
   }
 }
 
@@ -191,23 +260,51 @@ class LiveBusState {
   final bool isActive;
   final bool isFetching;
 
+  /// Viimeisimmän ONNISTUNEEN haun ajankohta. Epäonnistunut haku ei
+  /// päivitä leimaa, jolloin UI osaa kohdella dataa vanhentuneena.
+  final DateTime? positionsUpdatedAt;
+  final DateTime? tripUpdatesUpdatedAt;
+
+  // Sijainnit haetaan 3 s välein, viiveet 30 s välein. Raja on reilusti
+  // hakuväliä suurempi, jotta yksittäinen epäonnistuminen ei vilkuta UI:ta.
+  static const Duration _positionsMaxAge = Duration(seconds: 30);
+  static const Duration _tripUpdatesMaxAge = Duration(seconds: 90);
+
   LiveBusState({
     this.feed,
     this.tripUpdateFeed,
     this.isActive = false,
     this.isFetching = false,
+    this.positionsUpdatedAt,
+    this.tripUpdatesUpdatedAt,
   });
+
+  /// Onko bussien sijaintidata tarpeeksi tuoretta näytettäväksi kartalla.
+  bool get hasFreshPositions =>
+      feed != null &&
+      positionsUpdatedAt != null &&
+      DateTime.now().difference(positionsUpdatedAt!) < _positionsMaxAge;
+
+  /// Onko pysäkkiviivedata tarpeeksi tuoretta Live-merkin näyttämiseen.
+  bool get hasFreshTripUpdates =>
+      tripUpdateFeed != null &&
+      tripUpdatesUpdatedAt != null &&
+      DateTime.now().difference(tripUpdatesUpdatedAt!) < _tripUpdatesMaxAge;
 
   LiveBusState copyWith({
     FeedMessage? feed,
     FeedMessage? tripUpdateFeed,
     bool? isActive,
     bool? isFetching,
+    DateTime? positionsUpdatedAt,
+    DateTime? tripUpdatesUpdatedAt,
   }) => LiveBusState(
     feed: feed ?? this.feed,
     tripUpdateFeed: tripUpdateFeed ?? this.tripUpdateFeed,
     isActive: isActive ?? this.isActive,
     isFetching: isFetching ?? this.isFetching,
+    positionsUpdatedAt: positionsUpdatedAt ?? this.positionsUpdatedAt,
+    tripUpdatesUpdatedAt: tripUpdatesUpdatedAt ?? this.tripUpdatesUpdatedAt,
   );
 }
 
@@ -252,13 +349,19 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
   Future<void> fetchBuses() async {
     if (state.isFetching) return;
     state = state.copyWith(isFetching: true);
-    try {
-      final feed = await _api.fetchLiveBuses();
-      if (state.isActive) state = state.copyWith(feed: feed, isFetching: false);
-    } catch (_) {
-      // Verkkokatkos – ei hälytellä, yritetään uudelleen ensi kierroksella
-    } finally {
-      if (state.isFetching) state = state.copyWith(isFetching: false);
+    // Service käsittelee virheet ja palauttaa null epäonnistuessa.
+    final feed = await _api.fetchLiveBuses();
+    if (!mounted || !state.isActive) return;
+    if (feed != null) {
+      state = state.copyWith(
+        feed: feed,
+        positionsUpdatedAt: DateTime.now(),
+        isFetching: false,
+      );
+    } else {
+      // Vanha feed jää talteen, mutta aikaleima ei päivity – UI piilottaa
+      // vanhentuneet sijainnit hasFreshPositions-tarkistuksella.
+      state = state.copyWith(isFetching: false);
     }
   }
 
@@ -267,8 +370,12 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
     _isFetchingTripUpdates = true;
     try {
       final tripFeed = await _api.fetchTripUpdates();
-      if (state.isActive) {
-        state = state.copyWith(tripUpdateFeed: tripFeed);
+      if (!mounted || !state.isActive) return;
+      if (tripFeed != null) {
+        state = state.copyWith(
+          tripUpdateFeed: tripFeed,
+          tripUpdatesUpdatedAt: DateTime.now(),
+        );
       }
     } finally {
       _isFetchingTripUpdates = false;
@@ -295,15 +402,20 @@ class FavoritesNotifier extends StateNotifier<List<FavoriteRoute>> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList('favorites') ?? [];
-    state = raw.map((s) => FavoriteRoute.fromJson(json.decode(s))).toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList('favorites') ?? [];
+      state = raw.map((s) => FavoriteRoute.fromJson(json.decode(s))).toList();
+    } catch (e) {
+      debugPrint('Failed to load favorites: $e');
+    }
   }
 
+  bool isFavorite(Place dest) => state.any((f) => f.isSameDestination(dest));
+
   Future<void> toggleFavorite(Place dest, Place? start) async {
-    final alreadySaved = state.any((f) => f.destinationName == dest.name);
-    if (alreadySaved) {
-      state = state.where((f) => f.destinationName != dest.name).toList();
+    if (isFavorite(dest)) {
+      state = state.where((f) => !f.isSameDestination(dest)).toList();
     } else {
       state = [
         FavoriteRoute(
@@ -318,20 +430,24 @@ class FavoritesNotifier extends StateNotifier<List<FavoriteRoute>> {
         ...state,
       ];
     }
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      'favorites',
-      state.map((f) => json.encode(f.toJson())).toList(),
-    );
+    await _persist();
   }
 
   Future<void> removeFavorite(int index) async {
     final list = [...state]..removeAt(index);
     state = list;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      'favorites',
-      state.map((f) => json.encode(f.toJson())).toList(),
-    );
+    await _persist();
+  }
+
+  Future<void> _persist() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        'favorites',
+        state.map((f) => json.encode(f.toJson())).toList(),
+      );
+    } catch (e) {
+      debugPrint('Failed to save favorites: $e');
+    }
   }
 }
