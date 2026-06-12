@@ -16,7 +16,7 @@ class RouteCard extends StatefulWidget {
   final VoidCallback onToggleFavorite;
   final VoidCallback onShare;
   final FeedMessage? liveFeed;
-  final FeedMessage? tripUpdateFeed;
+  final Map<String, TripRealtime>? tripRealtime;
 
   const RouteCard({
     super.key,
@@ -29,7 +29,7 @@ class RouteCard extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onShare,
     this.liveFeed,
-    this.tripUpdateFeed,
+    this.tripRealtime,
   });
 
   @override
@@ -121,7 +121,7 @@ class _RouteCardState extends State<RouteCard> {
 
     final DateTime realArrival = realArrivalTime(
       widget.option,
-      widget.tripUpdateFeed,
+      widget.tripRealtime,
     );
 
     final totalMinutes = realArrival
@@ -159,7 +159,7 @@ class _RouteCardState extends State<RouteCard> {
         BusLegSection(
           leg: leg,
           formatTime: widget.formatTime,
-          tripUpdateFeed: widget.tripUpdateFeed,
+          tripRealtime: widget.tripRealtime,
         ),
       );
 
@@ -194,7 +194,7 @@ class _RouteCardState extends State<RouteCard> {
         final int lateness = transferLatenessMinutes(
           leg,
           nextLeg,
-          widget.tripUpdateFeed,
+          widget.tripRealtime,
         );
 
         if (lateness > 0) {
@@ -637,13 +637,13 @@ class TimelineDivider extends StatelessWidget {
 class BusLegSection extends StatefulWidget {
   final BusLeg leg;
   final String Function(DateTime) formatTime;
-  final FeedMessage? tripUpdateFeed;
+  final Map<String, TripRealtime>? tripRealtime;
 
   const BusLegSection({
     super.key,
     required this.leg,
     required this.formatTime,
-    this.tripUpdateFeed,
+    this.tripRealtime,
   });
 
   @override
@@ -661,18 +661,16 @@ class _BusLegSectionState extends State<BusLegSection> {
 
     DateTime realtimeDep = leg.realtimeDeparture;
     // Reaaliaikatieto voi tulla hakuhetken tilannekuvan lisäksi myös
-    // live-feedistä – esim. vaihtobussit eivät ole tilannekuvassa mukana.
+    // live-seurannasta – esim. vaihtobussit eivät ole tilannekuvassa mukana.
     bool hasRealtimeDep = leg.isRealtime;
-    if (widget.tripUpdateFeed != null && leg.fromStopId.isNotEmpty) {
-      final exactDep = getRealtimeStopTime(
-        widget.tripUpdateFeed,
-        leg,
-        leg.fromStopId,
-      );
-      if (exactDep != null) {
-        realtimeDep = exactDep;
-        hasRealtimeDep = true;
-      }
+    final exactDep = getRealtimeStopTime(
+      widget.tripRealtime,
+      leg,
+      leg.fromStopId,
+    );
+    if (exactDep != null) {
+      realtimeDep = exactDep;
+      hasRealtimeDep = true;
     }
 
     final bool hasDelay =
@@ -685,15 +683,13 @@ class _BusLegSectionState extends State<BusLegSection> {
           ? realtimeDep.difference(leg.departureTime)
           : Duration.zero,
     );
-    if (widget.tripUpdateFeed != null && leg.toStopId.isNotEmpty) {
-      final exactTime = getRealtimeArrivalTime(
-        widget.tripUpdateFeed,
-        leg,
-        leg.toStopId,
-      );
-      if (exactTime != null) {
-        finalBusArrivalTime = exactTime;
-      }
+    final exactArrival = getRealtimeArrivalTime(
+      widget.tripRealtime,
+      leg,
+      leg.toStopId,
+    );
+    if (exactArrival != null) {
+      finalBusArrivalTime = exactArrival;
     }
 
     Widget cancelOrDelayWidget = const SizedBox.shrink();
@@ -889,7 +885,7 @@ class _BusLegSectionState extends State<BusLegSection> {
                                             intermediateStopTimeLabel(
                                               i,
                                               leg,
-                                              widget.tripUpdateFeed,
+                                              widget.tripRealtime,
                                               widget.formatTime,
                                             ),
                                             style: const TextStyle(

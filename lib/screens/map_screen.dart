@@ -208,7 +208,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           transTime,
           speed,
           destPlace: dest,
-        );
+        )
+        .then((_) {
+          // Uusien reittiehdotusten viiveet heti, ei vasta seuraavalla
+          // 30 sekunnin kierroksella.
+          if (!mounted) return;
+          final live = ref.read(liveBusProvider);
+          if (live.isActive) {
+            ref.read(liveBusProvider.notifier).fetchTripUpdates();
+          }
+        });
   }
 
   String _formatTime(DateTime t) =>
@@ -418,7 +427,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     // Sama laskenta kuin reittikortissa, jotta jaettu aika ei eroa näytöstä.
     final DateTime realArrival = realArrivalTime(
       option,
-      liveState.tripUpdateFeed,
+      liveState.tripRealtime,
     );
 
     final buf = StringBuffer();
@@ -1528,7 +1537,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         isOfflineData: state.isOffline,
                         formatTime: _formatTime,
                         liveFeed: liveState.feed,
-                        tripUpdateFeed: liveState.tripUpdateFeed,
+                        tripRealtime: liveState.tripRealtime,
                         onTap: () {
                           ref.read(routeStateProvider.notifier).selectRoute(i);
                           _zoomToRoute(state.options, i);

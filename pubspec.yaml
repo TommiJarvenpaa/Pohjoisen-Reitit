@@ -51,9 +51,6 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_launcher_icons: ^0.14.4
-  # Testeissä rakennetaan GTFS-RT-protobufeja, joiden aikaleimat ovat Int64.
-  # Paketti on jo gtfs_realtime_bindingsin transitiivinen riippuvuus.
-  fixnum: ^1.1.1
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your

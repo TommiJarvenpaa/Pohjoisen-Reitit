@@ -6,7 +6,6 @@ import 'package:latlong2/latlong.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import '../models/app_models.dart';
-import 'realtime_utils.dart';
 
 class TransitService {
   final String digitransitKey;
@@ -84,9 +83,10 @@ class TransitService {
     return [];
   }
 
+  /// Bussien sijainnit Waltti GTFS-RT-feedistä. Viiveet haetaan
+  /// reititys-API:sta ([fetchTripRealtime]) – feediä käytetään vain
+  /// sijainteihin, joita reititys-API ei tarjoa.
   Future<FeedMessage?> fetchLiveBuses() => _fetchGtfsRtFeed('vehicleposition');
-
-  Future<FeedMessage?> fetchTripUpdates() => _fetchGtfsRtFeed('tripupdate');
 
   /// Palauttaa null virhetilanteessa – kutsuja päättää, miten vanhan
   /// datan kanssa toimitaan.
@@ -224,6 +224,78 @@ class TransitService {
         .map((st) => _parseStopTime(st as Map<String, dynamic>))
         .whereType<StopTimeData>()
         .toList();
+  }
+
+  /// Hakee vuorojen pysäkkikohtaiset reaaliaikatiedot reititys-API:sta.
+  ///
+  /// Digitransitin ohjeen mukaan trip updatet on integroitu reititys-API:in,
+  /// joten viiveet haetaan sieltä trip-gtfsId:llä – id:t ovat samasta
+  /// järjestelmästä kuin reittiehdotukset, eikä raakaan GTFS-RT-feediin
+  /// tarvita epävarmaa trip-id-täsmäystä. (Waltti-feediä käytetään enää
+  /// bussien sijainteihin, joita reititys-API ei tarjoa.)
+  ///
+  /// Palauttaa null virhetilanteessa, jolloin kutsuja voi pitää vanhan
+  /// datan ja merkitä sen vanhentuneeksi.
+  Future<Map<String, TripRealtime>?> fetchTripRealtime(
+    List<String> tripIds,
+  ) async {
+    final ids = tripIds.where((id) => id.isNotEmpty).take(30).toList();
+    if (ids.isEmpty) return {};
+
+    String tripQueries = '';
+    for (int i = 0; i < ids.length; i++) {
+      tripQueries +=
+          """
+        trip$i: trip(id: "${ids[i]}") {
+          gtfsId
+          stoptimes {
+            stop { gtfsId }
+            realtimeArrival realtimeDeparture realtime realtimeState serviceDay
+          }
+        }
+      """;
+    }
+
+    try {
+      final data = await _runGraphQl('{ $tripQueries }');
+      if (data == null) return null;
+
+      final Map<String, TripRealtime> result = {};
+      data.forEach((alias, tripData) {
+        if (tripData == null || tripData['gtfsId'] == null) return;
+        final stoptimes = tripData['stoptimes'] as List<dynamic>?;
+        if (stoptimes == null) return;
+
+        final Map<String, StopRealtime> byStopId = {};
+        for (final st in stoptimes) {
+          // Vain oikea reaaliaikatieto kelpaa – muuten aikataulun aika
+          // näkyisi käyttäjälle "live-tietona".
+          if (st['realtime'] != true) continue;
+          final String? stopId = st['stop']?['gtfsId'];
+          final int? serviceDay = st['serviceDay'];
+          if (stopId == null || serviceDay == null) continue;
+
+          DateTime? toTime(int? secs) => secs == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch((serviceDay + secs) * 1000);
+
+          byStopId[stopId] = StopRealtime(
+            arrival: toTime(st['realtimeArrival'] as int?),
+            departure: toTime(st['realtimeDeparture'] as int?),
+            realtimeState: st['realtimeState'] ?? 'UPDATED',
+          );
+        }
+        if (byStopId.isNotEmpty) {
+          result[tripData['gtfsId'] as String] = TripRealtime(
+            byStopId: byStopId,
+          );
+        }
+      });
+      return result;
+    } catch (e) {
+      debugPrint('Trip realtime fetch error: $e');
+      return null;
+    }
   }
 
   StopTimeData? _parseStopTime(Map<String, dynamic> st) {
@@ -573,11 +645,10 @@ class TransitService {
           // Onko tämä lähtö sama fyysinen vuoro kuin alkuperäisessä
           // reittiehdotuksessa? Vain silloin jatkovaiheiden trip-id:t
           // pitävät paikkansa – muille lähdöille ne kuvaisivat väärää
-          // vuoroa ja live-feed antaisi väärän bussin aikoja.
+          // vuoroa. Molemmat id:t ovat saman OTP-instanssin gtfsId:itä,
+          // joten suora vertailu riittää.
           final bool isOriginalDeparture =
-              stData.tripId.isNotEmpty &&
-              firstLeg.tripId.isNotEmpty &&
-              tripIdMatches(stData.tripId, firstLeg.tripId);
+              stData.tripId.isNotEmpty && stData.tripId == firstLeg.tripId;
 
           final List<BusLeg> clonedLegs = [];
           for (int k = 0; k < opt.busLegs.length; k++) {

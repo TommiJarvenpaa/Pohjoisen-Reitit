@@ -73,6 +73,25 @@ class IntermediateStop {
   }
 }
 
+/// Yhden pysäkin reaaliaikaiset ajat tietyllä vuorolla.
+/// Ajat tulevat reititys-API:sta (OTP), johon trip updatet on jo
+/// integroitu – ei raakaa GTFS-RT-feediä.
+class StopRealtime {
+  final DateTime? arrival;
+  final DateTime? departure;
+  final String realtimeState;
+
+  StopRealtime({this.arrival, this.departure, this.realtimeState = 'UPDATED'});
+}
+
+/// Vuoron reaaliaikatiedot pysäkeittäin, avaimena pysäkin gtfsId.
+/// Sisältää vain pysäkit, joille on oikeaa reaaliaikadataa.
+class TripRealtime {
+  final Map<String, StopRealtime> byStopId;
+
+  TripRealtime({required this.byStopId});
+}
+
 class StopTimeData {
   final int scheduledEpochSec;
   final int realtimeEpochSec;

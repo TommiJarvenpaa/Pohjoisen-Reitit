@@ -363,6 +363,78 @@ void main() {
     });
   });
 
+  group('fetchTripRealtime', () {
+    test('parsii vain reaaliaikaiset pysäkit vuoroittain', () async {
+      final serviceDay = DateTime(2026, 6, 11).millisecondsSinceEpoch ~/ 1000;
+      final client = MockClient((request) async {
+        return http.Response(
+          json.encode({
+            'data': {
+              'trip0': {
+                'gtfsId': 'OULU:111',
+                'stoptimes': [
+                  {
+                    'stop': {'gtfsId': 'OULU:201'},
+                    'realtimeArrival': 12 * 3600 + 240,
+                    'realtimeDeparture': 12 * 3600 + 300,
+                    'realtime': true,
+                    'realtimeState': 'UPDATED',
+                    'serviceDay': serviceDay,
+                  },
+                  // Pysäkki ilman oikeaa reaaliaikatietoa ohitetaan.
+                  {
+                    'stop': {'gtfsId': 'OULU:202'},
+                    'realtimeArrival': 12 * 3600,
+                    'realtimeDeparture': 12 * 3600,
+                    'realtime': false,
+                    'realtimeState': 'SCHEDULED',
+                    'serviceDay': serviceDay,
+                  },
+                ],
+              },
+              'trip1': null,
+            },
+          }),
+          200,
+          headers: _jsonHeaders,
+        );
+      });
+
+      final result = await makeService(
+        client,
+      ).fetchTripRealtime(['OULU:111', 'OULU:999']);
+
+      expect(result, isNotNull);
+      expect(result!.keys, ['OULU:111']);
+      final byStop = result['OULU:111']!.byStopId;
+      expect(byStop.keys, ['OULU:201']);
+      expect(byStop['OULU:201']!.departure, DateTime(2026, 6, 11, 12, 5));
+      expect(byStop['OULU:201']!.arrival, DateTime(2026, 6, 11, 12, 4));
+      expect(byStop['OULU:201']!.realtimeState, 'UPDATED');
+    });
+
+    test('palauttaa null virheestä, jotta vanha data säilyy', () async {
+      final client = MockClient(
+        (request) async => http.Response('error', 500),
+      );
+
+      expect(await makeService(client).fetchTripRealtime(['OULU:111']), isNull);
+    });
+
+    test('tyhjä vuorolista palautuu ilman API-kutsua', () async {
+      var called = false;
+      final client = MockClient((request) async {
+        called = true;
+        return http.Response('{}', 200);
+      });
+
+      final result = await makeService(client).fetchTripRealtime([]);
+
+      expect(result, isEmpty);
+      expect(called, isFalse);
+    });
+  });
+
   group('fetchNearbyStops', () {
     test('palauttaa tyhjän listan virheestä kaatumatta', () async {
       final client = MockClient(

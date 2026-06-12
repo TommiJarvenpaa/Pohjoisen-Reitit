@@ -255,8 +255,12 @@ class RouteNotifier extends StateNotifier<RouteState> {
 
 // Live seuranta
 class LiveBusState {
+  /// Bussien sijainnit Waltti GTFS-RT-feedistä (vain karttamerkit).
   final FeedMessage? feed;
-  final FeedMessage? tripUpdateFeed;
+
+  /// Vuorojen pysäkkikohtaiset viiveet reititys-API:sta, avaimena
+  /// vuoron gtfsId.
+  final Map<String, TripRealtime>? tripRealtime;
   final bool isActive;
   final bool isFetching;
 
@@ -272,7 +276,7 @@ class LiveBusState {
 
   LiveBusState({
     this.feed,
-    this.tripUpdateFeed,
+    this.tripRealtime,
     this.isActive = false,
     this.isFetching = false,
     this.positionsUpdatedAt,
@@ -287,20 +291,20 @@ class LiveBusState {
 
   /// Onko pysäkkiviivedata tarpeeksi tuoretta Live-merkin näyttämiseen.
   bool get hasFreshTripUpdates =>
-      tripUpdateFeed != null &&
+      tripRealtime != null &&
       tripUpdatesUpdatedAt != null &&
       DateTime.now().difference(tripUpdatesUpdatedAt!) < _tripUpdatesMaxAge;
 
   LiveBusState copyWith({
     FeedMessage? feed,
-    FeedMessage? tripUpdateFeed,
+    Map<String, TripRealtime>? tripRealtime,
     bool? isActive,
     bool? isFetching,
     DateTime? positionsUpdatedAt,
     DateTime? tripUpdatesUpdatedAt,
   }) => LiveBusState(
     feed: feed ?? this.feed,
-    tripUpdateFeed: tripUpdateFeed ?? this.tripUpdateFeed,
+    tripRealtime: tripRealtime ?? this.tripRealtime,
     isActive: isActive ?? this.isActive,
     isFetching: isFetching ?? this.isFetching,
     positionsUpdatedAt: positionsUpdatedAt ?? this.positionsUpdatedAt,
@@ -311,22 +315,23 @@ class LiveBusState {
 final liveBusProvider = StateNotifierProvider<LiveBusNotifier, LiveBusState>((
   ref,
 ) {
-  return LiveBusNotifier(ref.read(transitServiceProvider));
+  return LiveBusNotifier(ref.read(transitServiceProvider), ref);
 });
 
 class LiveBusNotifier extends StateNotifier<LiveBusState> {
   final TransitService _api;
+  final Ref _ref;
   Timer? _positionTimer;
   Timer? _tripUpdateTimer;
   bool _isFetchingTripUpdates = false;
 
-  LiveBusNotifier(this._api) : super(LiveBusState());
+  LiveBusNotifier(this._api, this._ref) : super(LiveBusState());
 
   void toggleTracking() {
     if (state.isActive) {
       _positionTimer?.cancel();
       _tripUpdateTimer?.cancel();
-      state = LiveBusState(isActive: false, feed: null, tripUpdateFeed: null);
+      state = LiveBusState(isActive: false, feed: null, tripRealtime: null);
     } else {
       state = state.copyWith(isActive: true);
 
@@ -365,15 +370,39 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
     }
   }
 
+  /// Näkyvien reittiehdotusten vuorot, valitun vaihtoehdon vuorot ensin –
+  /// jos vuoroja on enemmän kuin kyselyyn mahtuu, tärkeimmät säilyvät.
+  List<String> _visibleTripIds() {
+    final routeState = _ref.read(routeStateProvider);
+    final List<String> ids = [];
+    void addOption(RouteOption opt) {
+      for (final leg in opt.busLegs) {
+        if (leg.tripId.isNotEmpty && !ids.contains(leg.tripId)) {
+          ids.add(leg.tripId);
+        }
+      }
+    }
+
+    final options = routeState.options;
+    if (options.isNotEmpty) {
+      final selected = routeState.selectedIndex.clamp(0, options.length - 1);
+      addOption(options[selected]);
+      for (final opt in options) {
+        addOption(opt);
+      }
+    }
+    return ids;
+  }
+
   Future<void> fetchTripUpdates() async {
     if (_isFetchingTripUpdates) return;
     _isFetchingTripUpdates = true;
     try {
-      final tripFeed = await _api.fetchTripUpdates();
+      final tripRealtime = await _api.fetchTripRealtime(_visibleTripIds());
       if (!mounted || !state.isActive) return;
-      if (tripFeed != null) {
+      if (tripRealtime != null) {
         state = state.copyWith(
-          tripUpdateFeed: tripFeed,
+          tripRealtime: tripRealtime,
           tripUpdatesUpdatedAt: DateTime.now(),
         );
       }

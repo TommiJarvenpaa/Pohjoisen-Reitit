@@ -1,7 +1,5 @@
-import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import 'package:pohjoisen_reitit/models/app_models.dart';
 import 'package:pohjoisen_reitit/widgets/route_card.dart';
 
@@ -77,30 +75,16 @@ void main() {
         realtimeState: 'SCHEDULED',
         isRealtime: false,
       );
-      // Live-feed tietää lähdön olevan 5 min myöhässä.
-      final feed = FeedMessage(
-        entity: [
-          FeedEntity(
-            id: '1',
-            tripUpdate: TripUpdate(
-              trip: TripDescriptor(tripId: 'OULU:111'),
-              stopTimeUpdate: [
-                TripUpdate_StopTimeUpdate(
-                  stopId: '201',
-                  departure: TripUpdate_StopTimeEvent(
-                    time: Int64(
-                      dep
-                              .add(const Duration(minutes: 5))
-                              .millisecondsSinceEpoch ~/
-                          1000,
-                    ),
-                  ),
-                ),
-              ],
+      // Live-seuranta tietää lähdön olevan 5 min myöhässä.
+      final tripRealtime = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(
+              departure: dep.add(const Duration(minutes: 5)),
             ),
-          ),
-        ],
-      );
+          },
+        ),
+      };
 
       await tester.pumpWidget(
         MaterialApp(
@@ -108,7 +92,7 @@ void main() {
             body: BusLegSection(
               leg: leg,
               formatTime: _fmt,
-              tripUpdateFeed: feed,
+              tripRealtime: tripRealtime,
             ),
           ),
         ),
