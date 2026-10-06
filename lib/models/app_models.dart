@@ -61,36 +61,67 @@ class IntermediateStop {
   final double lon;
   final String? gtfsId;
 
+  /// Pysäkin aikataulun mukainen lähtöaika (OTP:n scheduledTime). Null
+  /// vanhassa välimuistissa – silloin aika arvioidaan lineaarisesti.
+  final DateTime? scheduledTime;
+
+  /// Hakuhetken reaaliaikaennuste pysäkille (OTP:n estimated.time). Null,
+  /// jos vuorolla ei ollut reaaliaikatietoa tai pysäkki on kopioitu toisen
+  /// vuoron pohjasta.
+  final DateTime? estimatedTime;
+
   IntermediateStop({
     required this.name,
     required this.lat,
     required this.lon,
     this.gtfsId,
+    this.scheduledTime,
+    this.estimatedTime,
   });
+
+  /// Kopio siirrettynä toiseen lähtöön: aikataulu siirtyy [offset]in verran,
+  /// pohjavuoron ennuste ei koske uutta vuoroa.
+  IntermediateStop shiftedBy(Duration offset) => IntermediateStop(
+    name: name,
+    lat: lat,
+    lon: lon,
+    gtfsId: gtfsId,
+    scheduledTime: scheduledTime?.add(offset),
+  );
+
+  /// Kopio ilman hakuhetken ennustetta (vanhentunut välimuistitieto).
+  IntermediateStop withoutEstimate() => IntermediateStop(
+    name: name,
+    lat: lat,
+    lon: lon,
+    gtfsId: gtfsId,
+    scheduledTime: scheduledTime,
+  );
 
   Map<String, dynamic> toJson() => {
         'name': name,
         'lat': lat,
         'lon': lon,
         if (gtfsId != null) 'gtfsId': gtfsId,
+        if (scheduledTime != null)
+          'scheduledTime': scheduledTime!.millisecondsSinceEpoch,
+        if (estimatedTime != null)
+          'estimatedTime': estimatedTime!.millisecondsSinceEpoch,
       };
 
   factory IntermediateStop.fromJson(Map<String, dynamic> json) {
+    DateTime? time(String key) => json[key] == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch((json[key] as num).toInt());
     final lat = json['lat'];
     final lon = json['lon'];
-    if (lat == null || lon == null) {
-      return IntermediateStop(
-        name: json['name'] ?? '',
-        lat: 0,
-        lon: 0,
-        gtfsId: json['gtfsId'] as String?,
-      );
-    }
     return IntermediateStop(
       name: json['name'] ?? '',
-      lat: (lat as num).toDouble(),
-      lon: (lon as num).toDouble(),
+      lat: lat == null ? 0 : (lat as num).toDouble(),
+      lon: lon == null ? 0 : (lon as num).toDouble(),
       gtfsId: json['gtfsId'] as String?,
+      scheduledTime: time('scheduledTime'),
+      estimatedTime: time('estimatedTime'),
     );
   }
 }
@@ -407,6 +438,10 @@ class RouteOption {
   /// vanhasta välimuistista (= tyhjä lista).
   final List<Duration> walkDurations;
 
+  /// Milloin reittiehdotus haettiin, eli minkä hetken ennusteita sen
+  /// reaaliaikatiedot ovat. Null = tuntematon (vanha välimuisti).
+  final DateTime? fetchedAt;
+
   RouteOption({
     required this.leaveHomeTime,
     required this.arrivalTime,
@@ -414,12 +449,25 @@ class RouteOption {
     required this.segments,
     this.walkDistances = const [],
     this.walkDurations = const [],
+    this.fetchedAt,
   });
+
+  RouteOption copyWith({List<BusLeg>? busLegs, DateTime? fetchedAt}) =>
+      RouteOption(
+        leaveHomeTime: leaveHomeTime,
+        arrivalTime: arrivalTime,
+        busLegs: busLegs ?? this.busLegs,
+        segments: segments,
+        walkDistances: walkDistances,
+        walkDurations: walkDurations,
+        fetchedAt: fetchedAt ?? this.fetchedAt,
+      );
 
   Map<String, dynamic> toJson() {
     return {
       'leaveHomeTime': leaveHomeTime.millisecondsSinceEpoch,
       'arrivalTime': arrivalTime.millisecondsSinceEpoch,
+      'fetchedAt': fetchedAt?.millisecondsSinceEpoch,
       'walkDistances': walkDistances,
       'walkDurationsSec': walkDurations.map((d) => d.inSeconds).toList(),
       'busLegs': busLegs.map((l) {
@@ -444,6 +492,9 @@ class RouteOption {
       arrivalTime: DateTime.fromMillisecondsSinceEpoch(
         json['arrivalTime'] ?? 0,
       ),
+      fetchedAt: json['fetchedAt'] == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(json['fetchedAt']),
       walkDistances: List<double>.from(
         rawWalks.map((v) {
           return (v as num).toDouble();

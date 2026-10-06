@@ -218,41 +218,314 @@ DateTime realArrivalTime(
   return displayedLegArrival(lastLeg, tripRealtime).add(walkAfterBus);
 }
 
-/// Välipysäkin aikataulun näyttöteksti: tarkka aika reaaliaikatiedoista jos
-/// saatavilla, muuten lineaarinen arvio matkavaiheen kokonaiskestosta.
-String intermediateStopTimeLabel(
+/// Mistä välipysäkin näytetty aika on peräisin.
+enum StopTimeKind {
+  /// Live-seurannan pysäkkikohtainen ennuste.
+  live,
+
+  /// Pysäkin oma aikataulu sellaisenaan (reaaliaikatietoa ei ole).
+  schedule,
+
+  /// Arvio: aikataulu viiveellä siirrettynä, hakuhetken ennuste tai vanhan
+  /// välimuistin lineaarinen arvio (näytetään "~"-merkillä).
+  estimate,
+}
+
+/// Pysäkin aika näyttöön ja sen lähde.
+class StopTimeEstimate {
+  final DateTime time;
+  final StopTimeKind kind;
+
+  const StopTimeEstimate(this.time, this.kind);
+
+  bool get isLive => kind == StopTimeKind.live;
+}
+
+/// Välipysäkin gtfsId. intermediateStops sisältää myös pysäkit ilman id:tä,
+/// legStopIds ei, joten id luetaan ensisijaisesti pysäkiltä itseltään.
+String? _intermediateStopId(BusLeg leg, int index) {
+  final String? own = leg.intermediateStops[index].gtfsId;
+  if (own != null && own.isNotEmpty) return own;
+  // Vanha välimuisti: id:t vain legStopIds-listassa (alku, välit, loppu).
+  if (leg.legStopIds.length == leg.intermediateStops.length + 2) {
+    return leg.legStopIds[index + 1];
+  }
+  return null;
+}
+
+/// Välipysäkin aika tarkimmasta saatavilla olevasta lähteestä:
+/// 1. live-seurannan pysäkkikohtainen ennuste,
+/// 2. pysäkin aikataulu siirrettynä live-seurannan lähtöviiveellä,
+/// 3. hakuhetken pysäkkikohtainen ennuste,
+/// 4. pysäkin aikataulu siirrettynä hakuhetken lähtöviiveellä,
+/// 5. pysäkin aikataulu sellaisenaan.
+/// Jos pysäkin aikataulu puuttuu (vanha välimuisti), sen tilalla käytetään
+/// lineaarista arviota vaiheen kestosta.
+StopTimeEstimate intermediateStopTime(
   int index,
   BusLeg leg,
   Map<String, TripRealtime>? tripRealtime,
-  String Function(DateTime) fmt,
 ) {
-  final Duration total = leg.arrivalTime.difference(leg.departureTime);
-  final int count = leg.intermediateStops.length + 1;
-  final int secs = ((index + 1) * total.inSeconds / count).round();
-  final DateTime scheduledT = leg.departureTime.add(Duration(seconds: secs));
+  final IntermediateStop stop = leg.intermediateStops[index];
+  final DateTime? scheduled = stop.scheduledTime;
+  final DateTime planned = scheduled ?? _linearStopTime(index, leg);
 
-  if (tripRealtime != null && leg.legStopIds.length > index + 1) {
-    final String stopId = leg.legStopIds[index + 1];
+  final String? stopId = _intermediateStopId(leg, index);
+  if (tripRealtime != null && stopId != null) {
     final DateTime? exactTime = getRealtimeStopTime(
       tripRealtime,
       leg,
       stopId,
-      near: scheduledT,
+      near: planned,
     );
-
     if (exactTime != null) {
-      return fmt(exactTime);
+      return StopTimeEstimate(exactTime, StopTimeKind.live);
     }
   }
 
   // Sama viivelähde kuin vaiheen lähtörivillä, jotta arviot eivät poikkea
-  // otsikossa näkyvästä viiveestä.
-  final DateTime? realtimeDep = realtimeLegDeparture(leg, tripRealtime);
-  final Duration delay = realtimeDep == null
-      ? Duration.zero
-      : realtimeDep.difference(leg.departureTime);
+  // otsikossa näkyvästä viiveestä: live-lähtö ennen hakuhetken ennustetta.
+  final DateTime? liveDep = getRealtimeStopTime(
+    tripRealtime,
+    leg,
+    leg.fromStopId,
+  );
+  if (liveDep != null) {
+    return StopTimeEstimate(
+      planned.add(liveDep.difference(leg.departureTime)),
+      StopTimeKind.estimate,
+    );
+  }
+  if (leg.isRealtime) {
+    final DateTime? estimated = stop.estimatedTime;
+    return StopTimeEstimate(
+      estimated ??
+          planned.add(leg.realtimeDeparture.difference(leg.departureTime)),
+      StopTimeKind.estimate,
+    );
+  }
+  return scheduled != null
+      ? StopTimeEstimate(scheduled, StopTimeKind.schedule)
+      : StopTimeEstimate(planned, StopTimeKind.estimate);
+}
 
-  return fmt(scheduledT.add(delay));
+/// Vaiheen saapumisaika ([displayedLegArrival]) ja sen lähde samalla
+/// jaottelulla kuin välipysäkeillä: live, pelkkä aikataulu tai arvio.
+StopTimeEstimate displayedLegArrivalEstimate(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  final DateTime time = displayedLegArrival(leg, tripRealtime);
+  if (getRealtimeArrivalTime(tripRealtime, leg, leg.toStopId) != null) {
+    return StopTimeEstimate(time, StopTimeKind.live);
+  }
+  final bool isScheduleOnly =
+      getRealtimeStopTime(tripRealtime, leg, leg.fromStopId) == null &&
+      !leg.isRealtime;
+  return StopTimeEstimate(
+    time,
+    isScheduleOnly ? StopTimeKind.schedule : StopTimeKind.estimate,
+  );
+}
+
+/// Vanhan välimuistin varalla: tasavälinen arvio vaiheen kestosta.
+DateTime _linearStopTime(int index, BusLeg leg) {
+  final Duration total = leg.arrivalTime.difference(leg.departureTime);
+  final int count = leg.intermediateStops.length + 1;
+  final int secs = ((index + 1) * total.inSeconds / count).round();
+  return leg.departureTime.add(Duration(seconds: secs));
+}
+
+/// Onko kellonaika jo mennyt minuuttitarkkuudella (sama minuutti = ei vielä).
+bool _isPast(DateTime time, DateTime now) => clockMinutesBetween(time, now) > 0;
+
+/// Vaiheen eteneminen nykyhetkellä näytettyjen (live- tai arvio)aikojen
+/// perusteella.
+class LegProgress {
+  /// Bussi on lähtenyt nousupysäkiltä.
+  final bool hasDeparted;
+
+  /// Montako välipysäkkiä on ohitettu (alusta lukien yhtenäisesti).
+  final int passedStops;
+
+  /// Bussi on ohittanut poistumispysäkin.
+  final bool hasArrived;
+
+  /// Perustuuko seuraavan pysäkin aika live-ennusteeseen.
+  final bool isLive;
+
+  const LegProgress({
+    required this.hasDeparted,
+    required this.passedStops,
+    required this.hasArrived,
+    required this.isLive,
+  });
+}
+
+LegProgress legProgress(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+  DateTime now,
+) {
+  final DateTime departure =
+      realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
+  if (!_isPast(departure, now)) {
+    return LegProgress(
+      hasDeparted: false,
+      passedStops: 0,
+      hasArrived: false,
+      isLive: legDepartureSource(leg, tripRealtime) == RealtimeSource.live,
+    );
+  }
+
+  int passed = 0;
+  bool nextIsLive = false;
+  for (int i = 0; i < leg.intermediateStops.length; i++) {
+    final StopTimeEstimate estimate = intermediateStopTime(
+      i,
+      leg,
+      tripRealtime,
+    );
+    if (!_isPast(estimate.time, now)) {
+      nextIsLive = estimate.isLive;
+      break;
+    }
+    passed++;
+  }
+
+  final bool allPassed = passed == leg.intermediateStops.length;
+  final bool hasArrived =
+      allPassed && _isPast(displayedLegArrival(leg, tripRealtime), now);
+  if (allPassed) {
+    nextIsLive =
+        getRealtimeArrivalTime(tripRealtime, leg, leg.toStopId) != null;
+  }
+  return LegProgress(
+    hasDeparted: true,
+    passedStops: passed,
+    hasArrived: hasArrived,
+    isLive: nextIsLive,
+  );
+}
+
+/// Mistä vaiheen lähtöaika on peräisin.
+enum RealtimeSource {
+  /// Live-seurannan tuore pysäkkikohtainen ennuste.
+  live,
+
+  /// Hakuhetken ennuste (reittiehdotuksen tilannekuva).
+  snapshot,
+
+  /// Pelkkä aikataulu.
+  schedule,
+}
+
+RealtimeSource legDepartureSource(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  if (getRealtimeStopTime(tripRealtime, leg, leg.fromStopId) != null) {
+    return RealtimeSource.live;
+  }
+  return leg.isRealtime ? RealtimeSource.snapshot : RealtimeSource.schedule;
+}
+
+/// Reittikortin tilamerkinnän vaihe.
+enum TripPhase {
+  /// Lähtöön yli 5 min.
+  leaveLater,
+
+  /// Lähtöön 1–5 min.
+  leaveSoon,
+
+  /// Lähtöaika on nyt tai mennyt, mutta bussi ei ole vielä lähtenyt.
+  leaveNow,
+
+  /// Ensimmäinen bussi on lähtenyt (tai kävelyreitin lähtöaika mennyt).
+  departed,
+}
+
+class TripStatus {
+  final TripPhase phase;
+
+  /// Minuutteja lähtöön (vaiheissa leaveLater/leaveSoon).
+  final int minutesToLeave;
+
+  /// Ensimmäisen bussin näytetty lähtöaika (null kävelyreitillä).
+  final DateTime? busDeparture;
+
+  const TripStatus(this.phase, {this.minutesToLeave = 0, this.busDeparture});
+}
+
+/// Reitin tila nykyhetkellä: kauanko lähtöön, pitääkö lähteä nyt vai onko
+/// bussi jo lähtenyt. Minuutit lasketaan näytetyistä kellonajoista.
+TripStatus tripStatus(
+  RouteOption option,
+  Map<String, TripRealtime>? tripRealtime,
+  DateTime now,
+) {
+  final DateTime leave = displayedLeaveTime(option, tripRealtime);
+  final int minutesToLeave = clockMinutesBetween(now, leave);
+
+  DateTime? busDeparture;
+  if (option.busLegs.isNotEmpty) {
+    final BusLeg first = option.busLegs.first;
+    busDeparture =
+        realtimeLegDeparture(first, tripRealtime) ?? first.departureTime;
+    if (_isPast(busDeparture, now)) {
+      return TripStatus(TripPhase.departed, busDeparture: busDeparture);
+    }
+  } else if (minutesToLeave < 0) {
+    return const TripStatus(TripPhase.departed);
+  }
+
+  if (minutesToLeave > 5) {
+    return TripStatus(
+      TripPhase.leaveLater,
+      minutesToLeave: minutesToLeave,
+      busDeparture: busDeparture,
+    );
+  }
+  if (minutesToLeave > 0) {
+    return TripStatus(
+      TripPhase.leaveSoon,
+      minutesToLeave: minutesToLeave,
+      busDeparture: busDeparture,
+    );
+  }
+  return TripStatus(TripPhase.leaveNow, busDeparture: busDeparture);
+}
+
+/// Saman linjan seuraava lähtö samalta pysäkiltä muiden reittiehdotusten
+/// joukosta – näytetään perutun vuoron kohdalla. Jo lähteneitä ei tarjota.
+/// Null, jos sellaista ei ole.
+DateTime? nextSameLineDeparture(
+  List<RouteOption> options,
+  int index,
+  Map<String, TripRealtime>? tripRealtime,
+  DateTime now,
+) {
+  if (index < 0 || index >= options.length) return null;
+  if (options[index].busLegs.isEmpty) return null;
+  final BusLeg leg = options[index].busLegs.first;
+  final DateTime own =
+      realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
+
+  DateTime? best;
+  for (int i = 0; i < options.length; i++) {
+    if (i == index || options[i].busLegs.isEmpty) continue;
+    final BusLeg other = options[i].busLegs.first;
+    if (other.busNumber != leg.busNumber ||
+        other.fromStopId != leg.fromStopId) {
+      continue;
+    }
+    if (legCancellation(other, tripRealtime) != LegCancellation.none) continue;
+    final DateTime dep =
+        realtimeLegDeparture(other, tripRealtime) ?? other.departureTime;
+    if (!dep.isAfter(own) || _isPast(dep, now)) continue;
+    if (best == null || dep.isBefore(best)) best = dep;
+  }
+  return best;
 }
 
 /// Montako minuuttia edellinen bussi on myöhässä suhteessa seuraavan

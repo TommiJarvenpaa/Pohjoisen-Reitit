@@ -51,6 +51,7 @@ Map<String, dynamic> busLegJson({
   // Digitransitin oikea muoto (dokumentaatiosta poiketen väliviivoin).
   String serviceDate = '2026-06-11',
   List<Map<String, dynamic>> alerts = const [],
+  List<Map<String, dynamic>> intermediatePlaces = const [],
 }) => {
   'mode': 'BUS',
   'startTime': departure
@@ -83,8 +84,30 @@ Map<String, dynamic> busLegJson({
     'stop': {'gtfsId': toStopId},
   },
   'legGeometry': null,
-  'intermediateStops': [],
+  'intermediatePlaces': intermediatePlaces,
 };
+
+/// OTP:n välipysäkki: ajat ISO-8601-muodossa aikavyöhykkeineen, kuten
+/// Digitransit ne palauttaa (esim. 2026-10-06T14:52:42+03:00).
+Map<String, dynamic> placeJson({
+  required String stopId,
+  required DateTime scheduled,
+  DateTime? estimated,
+}) {
+  String iso(DateTime t) => t.toUtc().toIso8601String();
+  final time = {
+    'scheduledTime': iso(scheduled),
+    'estimated': estimated == null ? null : {'time': iso(estimated)},
+  };
+  return {
+    'name': 'Pysäkki $stopId',
+    'lat': 65.03,
+    'lon': 25.47,
+    'stop': {'gtfsId': stopId},
+    'arrival': time,
+    'departure': time,
+  };
+}
 
 Map<String, dynamic> walkLegJson({
   required DateTime start,
@@ -562,6 +585,80 @@ void main() {
         arr.add(const Duration(minutes: 17)),
       );
       expect(clone.alerts.map((a) => a.text), ['Pysäkki siirretty']);
+    });
+
+    test('välipysäkit saavat oman aikataulunsa ja ennusteensa', () async {
+      final arr = DateTime(2026, 6, 11, 12, 30);
+      final plan = planJson([
+        itineraryJson([
+          busLegJson(
+            tripId: 'OULU:111',
+            departure: dep,
+            arrival: arr,
+            fromStopId: 'OULU:201',
+            toStopId: 'OULU:205',
+            departureDelaySec: 120,
+            arrivalDelaySec: 120,
+            realTime: true,
+            intermediatePlaces: [
+              placeJson(
+                stopId: 'OULU:202',
+                scheduled: DateTime(2026, 6, 11, 12, 3, 20),
+                estimated: DateTime(2026, 6, 11, 12, 5, 20),
+              ),
+              placeJson(
+                stopId: 'OULU:203',
+                scheduled: DateTime(2026, 6, 11, 12, 26),
+              ),
+            ],
+          ),
+        ]),
+      ]);
+      final timetable = {
+        'stop0': {
+          'gtfsId': 'OULU:201',
+          'stoptimesWithoutPatterns': [
+            stoptimeJson(
+              tripId: 'OULU:111',
+              scheduledDeparture: noonSecs,
+              serviceDay: serviceDay,
+            ),
+            stoptimeJson(
+              tripId: 'OULU:333',
+              scheduledDeparture: noonSecs + 900,
+              serviceDay: serviceDay,
+            ),
+          ],
+        },
+      };
+
+      final options = await makeService(
+        planClient(plan: plan, timetable: timetable),
+      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+
+      final original = options[0].busLegs.single;
+      expect(original.intermediateStops.map((s) => s.gtfsId), [
+        'OULU:202',
+        'OULU:203',
+      ]);
+      expect(
+        original.intermediateStops[0].scheduledTime,
+        DateTime(2026, 6, 11, 12, 3, 20),
+      );
+      expect(
+        original.intermediateStops[0].estimatedTime,
+        DateTime(2026, 6, 11, 12, 5, 20),
+      );
+      expect(original.intermediateStops[1].estimatedTime, isNull);
+
+      // Kopioidun lähdön aikataulu siirtyy, pohjavuoron ennuste ei siirry.
+      final clone = options[1].busLegs.single;
+      expect(clone.tripId, 'OULU:333');
+      expect(
+        clone.intermediateStops[0].scheduledTime,
+        DateTime(2026, 6, 11, 12, 18, 20),
+      );
+      expect(clone.intermediateStops[0].estimatedTime, isNull);
     });
 
     test('lähtöä, jolle ei ehdi kävellä, ei kopioida', () async {

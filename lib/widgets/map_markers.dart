@@ -3,25 +3,37 @@ import 'dart:math' as math;
 import '../theme/app_colors.dart';
 
 class StartMarker extends StatelessWidget {
-  const StartMarker({super.key});
+  /// Pieni versio reitin ollessa näkyvissä, jottei merkki peitä
+  /// nousupysäkkiä tai kävelyviivaa.
+  final bool isCompact;
+
+  const StartMarker({super.key, this.isCompact = false});
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: kWalk,
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white, width: 3),
-        boxShadow: [
-          BoxShadow(
-            color: kWalk.withValues(alpha: 0.4),
-            blurRadius: 8,
-            spreadRadius: 2,
-          ),
-        ],
+    final double size = isCompact ? 20 : 36;
+    return Tooltip(
+      message: 'Lähtöpiste',
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: kWalk,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: isCompact ? 2 : 3),
+          boxShadow: [
+            BoxShadow(
+              color: kWalk.withValues(alpha: 0.4),
+              blurRadius: isCompact ? 4 : 8,
+              spreadRadius: isCompact ? 1 : 2,
+            ),
+          ],
+        ),
+        child: Icon(
+          Icons.trip_origin,
+          color: Colors.white,
+          size: isCompact ? 10 : 18,
+        ),
       ),
-      child: const Icon(Icons.trip_origin, color: Colors.white, size: 18),
     );
   }
 }

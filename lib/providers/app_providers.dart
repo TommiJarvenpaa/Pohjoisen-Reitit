@@ -316,9 +316,7 @@ class RouteNotifier extends StateNotifier<RouteState> {
 
   /// Välimuistin reitti on vanha tilannekuva: hakuhetken viiveet ja
   /// tilatiedot eivät enää pidä paikkaansa, joten näytetään vain aikataulu.
-  static RouteOption _withoutRealtime(RouteOption option) => RouteOption(
-    leaveHomeTime: option.leaveHomeTime,
-    arrivalTime: option.arrivalTime,
+  static RouteOption _withoutRealtime(RouteOption option) => option.copyWith(
     busLegs: option.busLegs
         .map(
           (leg) => leg.copyWith(
@@ -326,12 +324,12 @@ class RouteNotifier extends StateNotifier<RouteState> {
             realtimeDeparture: leg.departureTime,
             clearRealtimeArrival: true,
             realtimeState: 'SCHEDULED',
+            intermediateStops: leg.intermediateStops
+                .map((s) => s.withoutEstimate())
+                .toList(),
           ),
         )
         .toList(),
-    segments: option.segments,
-    walkDistances: option.walkDistances,
-    walkDurations: option.walkDurations,
   );
 
   Future<void> _loadOfflineCache() async {

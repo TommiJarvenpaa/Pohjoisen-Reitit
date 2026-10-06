@@ -332,8 +332,31 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final allPoints = options[index].segments.expand((s) => s.points).toList();
     if (allPoints.isNotEmpty) {
       final bounds = LatLngBounds.fromPoints(allPoints);
+      // Alapaneeli peittää kartan alaosan ja hakupaneeli yläosan: reitti
+      // sovitetaan niiden väliin jäävään alueeseen. Reunukset rajataan
+      // kartan omasta korkeudesta, jottei vaakatilassa zoomaus karkaa koko
+      // maapallon näkymään.
+      final double mapHeight = _mapController.camera.nonRotatedSize.height;
+      final double topPadding = _showSearchPanel ? 220 : 60;
+      const double minVisibleHeight = 120;
+      final double sheetHeight = _sheetController.isAttached
+          ? _sheetController.pixels
+          : 0;
+      double bottomPadding = sheetHeight + 24;
+      if (bottomPadding < 60) bottomPadding = 60;
+      final double maxBottomPadding = mapHeight - topPadding - minVisibleHeight;
+      if (bottomPadding > maxBottomPadding) bottomPadding = maxBottomPadding;
+      if (bottomPadding < 0) bottomPadding = 0;
+      double safeTopPadding = topPadding;
+      if (safeTopPadding + bottomPadding + minVisibleHeight > mapHeight) {
+        safeTopPadding = mapHeight - bottomPadding - minVisibleHeight;
+        if (safeTopPadding < 0) safeTopPadding = 0;
+      }
       _mapController.fitCamera(
-        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(100)),
+        CameraFit.bounds(
+          bounds: bounds,
+          padding: EdgeInsets.fromLTRB(40, safeTopPadding, 40, bottomPadding),
+        ),
       );
     }
   }
@@ -1672,6 +1695,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         formatTime: _formatTime,
                         liveFeed: liveState.feed,
                         tripRealtime: liveState.tripRealtime,
+                        realtimeUpdatedAt: liveState.hasFreshTripUpdates
+                            ? liveState.tripUpdatesUpdatedAt
+                            : null,
+                        nextLineDeparture: nextSameLineDeparture(
+                          state.options,
+                          i,
+                          liveState.tripRealtime,
+                          DateTime.now(),
+                        ),
                         onTap: () {
                           ref.read(routeStateProvider.notifier).selectRoute(i);
                           _zoomToRoute(state.options, i);
@@ -1745,13 +1777,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       ),
     ];
 
+    // Reitin ollessa näkyvissä lähtömerkki pienenee, jottei se peitä
+    // nousupysäkkiä ja kävelyviivaa.
+    final bool isRouteShown = routeStopMarkers.isNotEmpty;
     if (startLoc != null) {
+      final double size = isRouteShown ? 24 : 42;
       mainMarkers.add(
         Marker(
           point: LatLng(startLoc.lat, startLoc.lon),
-          width: 42,
-          height: 42,
-          child: const StartMarker(),
+          width: size,
+          height: size,
+          child: StartMarker(isCompact: isRouteShown),
         ),
       );
     }
@@ -1793,7 +1829,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       mapChildren.add(MarkerLayer(markers: _stopMarkers));
     }
 
-    if (routeStopMarkers.isNotEmpty) {
+    // Reitin ollessa näkyvissä sen pysäkit ja live-bussit piirretään lähtö-
+    // ja sijaintimerkkien päälle: nousupysäkki on reitin tärkein kohta.
+    // Ilman reittiä oma sijainti pysyy päällimmäisenä, ettei kaupungin
+    // bussijoukko peitä sitä.
+    if (isRouteShown) {
+      mapChildren.add(MarkerLayer(markers: mainMarkers));
       mapChildren.add(MarkerLayer(markers: routeStopMarkers));
     }
 
@@ -1801,7 +1842,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       mapChildren.add(MarkerLayer(markers: mapLiveMarkers));
     }
 
-    mapChildren.add(MarkerLayer(markers: mainMarkers));
+    if (!isRouteShown) {
+      mapChildren.add(MarkerLayer(markers: mainMarkers));
+    }
 
     final List<Widget> stackChildren = [
       FlutterMap(

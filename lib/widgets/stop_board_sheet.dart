@@ -162,11 +162,16 @@ class _StopBoardSheetState extends ConsumerState<StopBoardSheet> {
           dep.realtimeEpochSec * 1000,
         );
         final bool isCanceled = dep.isCanceled;
-        // Myöhässä vain, jos näytetty kellonaika poikkeaa aikataulusta.
-        final bool isDelayed =
-            !isCanceled &&
-            dep.isRealtime &&
-            clockMinutesBetween(scheduledTime, depTime) > 0;
+        // Myöhässä tai etuajassa vain, jos näytetty kellonaika poikkeaa
+        // aikataulusta.
+        final int delayMin = clockMinutesBetween(scheduledTime, depTime);
+        final bool isDelayed = !isCanceled && dep.isRealtime && delayMin > 0;
+        final bool isEarly = !isCanceled && dep.isRealtime && delayMin < 0;
+        final Color liveColor = isDelayed
+            ? kDelayed
+            : isEarly
+            ? kEarly
+            : kOnTime;
 
         // Luodaan "vale-BussiMatka", jotta voimme käyttää reittikortin
         // älykästä ja klikattavaa BusNumberBadgea. departureTime on
@@ -209,9 +214,7 @@ class _StopBoardSheetState extends ConsumerState<StopBoardSheet> {
                   decoration: isCanceled ? TextDecoration.lineThrough : null,
                   color: isCanceled
                       ? Colors.grey
-                      : isDelayed
-                      ? kDelayed
-                      : (dep.isRealtime ? kOnTime : Colors.black87),
+                      : (dep.isRealtime ? liveColor : Colors.black87),
                 ),
               ),
               if (isCanceled)
@@ -224,10 +227,13 @@ class _StopBoardSheetState extends ConsumerState<StopBoardSheet> {
                   ),
                 )
               else if (dep.isRealtime)
-                Icon(
-                  Icons.rss_feed,
-                  size: 12,
-                  color: isDelayed ? kDelayed : kOnTime,
+                Semantics(
+                  label: isDelayed
+                      ? '$delayMin min myöhässä'
+                      : isEarly
+                      ? '${-delayMin} min etuajassa'
+                      : 'ajallaan',
+                  child: Icon(Icons.rss_feed, size: 12, color: liveColor),
                 ),
             ],
           ),

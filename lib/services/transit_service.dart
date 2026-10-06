@@ -455,7 +455,9 @@ class TransitService {
       (a, b) =>
           displayedLeaveTime(a, null).compareTo(displayedLeaveTime(b, null)),
     );
-    return parsedOptions;
+    // Hakuhetki talteen: kortti kertoo, minkä hetken ennuste viive on.
+    final DateTime fetchedAt = DateTime.now();
+    return [for (final o in parsedOptions) o.copyWith(fetchedAt: fetchedAt)];
   }
 
   String _buildPlanQuery(
@@ -495,7 +497,11 @@ class TransitService {
             from { name lat lon stop { gtfsId } }
             to { name lat lon stop { gtfsId } }
             legGeometry { points }
-            intermediateStops { name lat lon gtfsId }
+            intermediatePlaces {
+              name lat lon stop { gtfsId }
+              arrival { scheduledTime estimated { time } }
+              departure { scheduledTime estimated { time } }
+            }
           }
         }
       }
@@ -505,6 +511,11 @@ class TransitService {
 
   /// OTP:n viivekenttä sekunteina (puuttuu tai null = ei viivettä).
   static int _delaySec(dynamic value) => (value as num?)?.toInt() ?? 0;
+
+  /// OTP:n ISO-8601-aika (esim. 2026-10-06T14:52:42+03:00) paikalliseksi
+  /// ajaksi. Null, jos arvo puuttuu tai on virheellinen.
+  static DateTime? _isoToLocal(dynamic value) =>
+      value is String ? DateTime.tryParse(value)?.toLocal() : null;
 
   static DateTime? _epochSecToDate(dynamic value) =>
       value is num && value > 0
@@ -606,23 +617,34 @@ class TransitService {
 
     final bool stayOnBus = leg['interlineWithPreviousLeg'] ?? false;
 
+    // Välipysäkit aikatauluineen: scheduledTime on pysäkin oikea aikataulu,
+    // estimated.time hakuhetken ennuste (null ilman reaaliaikatietoa).
     final List<IntermediateStop> intermediateStops = [];
     final List<String> legStopIds = [fromStopId];
-    final rawStops = leg['intermediateStops'] as List<dynamic>?;
+    final rawPlaces = leg['intermediatePlaces'] as List<dynamic>?;
 
-    if (rawStops != null) {
-      for (var s in rawStops) {
-        if (s['lat'] != null && s['lon'] != null) {
-          String? stopGtfsId = s['gtfsId'] as String?;
+    if (rawPlaces != null) {
+      for (var p in rawPlaces) {
+        if (p['lat'] != null && p['lon'] != null) {
+          String? stopGtfsId = p['stop']?['gtfsId'] as String?;
           if (stopGtfsId != null && stopGtfsId.isNotEmpty) {
             legStopIds.add(stopGtfsId);
           }
+          // Lähtöaika ensisijaisesti, kuten live-ennusteissa.
+          final departure = p['departure'];
+          final arrival = p['arrival'];
           intermediateStops.add(
             IntermediateStop(
-              name: s['name'] ?? '',
-              lat: (s['lat'] as num).toDouble(),
-              lon: (s['lon'] as num).toDouble(),
+              name: p['name'] ?? '',
+              lat: (p['lat'] as num).toDouble(),
+              lon: (p['lon'] as num).toDouble(),
               gtfsId: stopGtfsId,
+              scheduledTime:
+                  _isoToLocal(departure?['scheduledTime']) ??
+                  _isoToLocal(arrival?['scheduledTime']),
+              estimatedTime:
+                  _isoToLocal(departure?['estimated']?['time']) ??
+                  _isoToLocal(arrival?['estimated']?['time']),
             ),
           );
         }
@@ -852,6 +874,11 @@ class TransitService {
             clearRealtimeArrival: true,
             realtimeState: stData.realtimeState,
             isRealtime: stData.isRealtime,
+            // Välipysäkkien aikataulu siirtyy lähdön mukana; pohjavuoron
+            // pysäkkiennusteet eivät koske tätä vuoroa.
+            intermediateStops: templateLeg.intermediateStops
+                .map((s) => s.shiftedBy(offset))
+                .toList(),
             // Pohjavuoron omat tiedotteet eivät koske toista vuoroa.
             alerts: templateLeg.alerts
                 .where((a) => a.tripId.isEmpty || a.tripId == stData.tripId)

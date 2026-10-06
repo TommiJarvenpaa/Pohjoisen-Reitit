@@ -409,82 +409,400 @@ void main() {
     });
   });
 
-  group('intermediateStopTimeLabel', () {
-    String fmt(DateTime t) =>
-        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  // 30 min matka, 2 välipysäkkiä (A = OULU:202, B = OULU:203).
+  final twoStops = [
+    IntermediateStop(name: 'A', lat: 0, lon: 0, gtfsId: 'OULU:202'),
+    IntermediateStop(name: 'B', lat: 0, lon: 0, gtfsId: 'OULU:203'),
+  ];
+  const twoStopIds = ['OULU:201', 'OULU:202', 'OULU:203', 'OULU:205'];
 
+  group('intermediateStopTime', () {
     test('arvioi ajan lineaarisesti ilman reaaliaikatietoja', () {
-      // 30 min matka, 2 välipysäkkiä -> kolmasosa per väli.
-      final leg = makeLeg(
-        intermediateStops: [
-          IntermediateStop(name: 'A', lat: 0, lon: 0),
-          IntermediateStop(name: 'B', lat: 0, lon: 0),
-        ],
-      );
+      // Kolmasosa matkasta per väli.
+      final leg = makeLeg(intermediateStops: twoStops, legStopIds: twoStopIds);
 
-      expect(intermediateStopTimeLabel(0, leg, null, fmt), '12:10');
-      expect(intermediateStopTimeLabel(1, leg, null, fmt), '12:20');
+      final a = intermediateStopTime(0, leg, null);
+      expect(a.time, DateTime(2026, 6, 11, 12, 10));
+      expect(a.isLive, isFalse);
+      expect(
+        intermediateStopTime(1, leg, null).time,
+        DateTime(2026, 6, 11, 12, 20),
+      );
     });
 
     test('lisää viiveen arvioon kun matka on myöhässä', () {
       final leg = makeLeg(
         realtimeDeparture: DateTime(2026, 6, 11, 12, 5),
         isRealtime: true,
-        intermediateStops: [
-          IntermediateStop(name: 'A', lat: 0, lon: 0),
-          IntermediateStop(name: 'B', lat: 0, lon: 0),
-        ],
+        intermediateStops: twoStops,
+        legStopIds: twoStopIds,
       );
 
-      expect(intermediateStopTimeLabel(0, leg, null, fmt), '12:15');
+      expect(
+        intermediateStopTime(0, leg, null).time,
+        DateTime(2026, 6, 11, 12, 15),
+      );
     });
 
     test('arvio käyttää samaa live-viivettä kuin lähtörivi', () {
       // Tilannekuvassa ei viivettä, live-seuranta tietää 5 min viiveen
       // lähtöpysäkillä mutta ei välipysäkeillä.
+      final leg = makeLeg(intermediateStops: twoStops, legStopIds: twoStopIds);
+      final data = realtimeMap(
+        stopId: 'OULU:201',
+        departure: DateTime(2026, 6, 11, 12, 5),
+      );
+
+      final a = intermediateStopTime(0, leg, data);
+      expect(a.time, DateTime(2026, 6, 11, 12, 15));
+      expect(a.isLive, isFalse);
+    });
+
+    test('käyttää live-ennustetta kun se on saatavilla', () {
+      final leg = makeLeg(intermediateStops: twoStops, legStopIds: twoStopIds);
+      // Arvio pysäkille on 12:10, live-ennuste 12:13.
+      final data = realtimeMap(
+        stopId: 'OULU:202',
+        departure: DateTime(2026, 6, 11, 12, 13),
+      );
+
+      final a = intermediateStopTime(0, leg, data);
+      expect(a.time, DateTime(2026, 6, 11, 12, 13));
+      expect(a.isLive, isTrue);
+    });
+
+    test('pysäkki ilman id:tä ei siirrä seuraavien pysäkkien id:itä', () {
+      // legStopIds ohittaa pysäkit ilman id:tä; aiemmin B:n aika luettiin
+      // väärältä pysäkiltä.
       final leg = makeLeg(
         intermediateStops: [
-          IntermediateStop(name: 'A', lat: 0, lon: 0),
-          IntermediateStop(name: 'B', lat: 0, lon: 0),
+          IntermediateStop(name: 'Nimetön', lat: 0, lon: 0),
+          IntermediateStop(name: 'B', lat: 0, lon: 0, gtfsId: 'OULU:203'),
         ],
+        legStopIds: const ['OULU:201', 'OULU:203', 'OULU:205'],
+      );
+      final data = realtimeMap(
+        stopId: 'OULU:203',
+        departure: DateTime(2026, 6, 11, 12, 22),
+      );
+
+      expect(intermediateStopTime(0, leg, data).isLive, isFalse);
+      expect(
+        intermediateStopTime(1, leg, data).time,
+        DateTime(2026, 6, 11, 12, 22),
+      );
+    });
+
+    test('hylkää eri liikennöintipäivän ajan ja käyttää arviota', () {
+      final leg = makeLeg(intermediateStops: twoStops, legStopIds: twoStopIds);
+      final data = realtimeMap(
+        stopId: 'OULU:202',
+        departure: DateTime(2026, 6, 10, 12, 13),
+      );
+
+      expect(
+        intermediateStopTime(0, leg, data).time,
+        DateTime(2026, 6, 11, 12, 10),
+      );
+    });
+  });
+
+  group('intermediateStopTime pysäkin omalla aikataululla', () {
+    // Epätasaiset välit: A heti alussa, B lähellä loppua (lineaarinen
+    // arvio antaisi 12:10 ja 12:20).
+    final scheduledStops = [
+      IntermediateStop(
+        name: 'A',
+        lat: 0,
+        lon: 0,
+        gtfsId: 'OULU:202',
+        scheduledTime: DateTime(2026, 6, 11, 12, 3, 20),
+      ),
+      IntermediateStop(
+        name: 'B',
+        lat: 0,
+        lon: 0,
+        gtfsId: 'OULU:203',
+        scheduledTime: DateTime(2026, 6, 11, 12, 26),
+        estimatedTime: DateTime(2026, 6, 11, 12, 29),
+      ),
+    ];
+
+    test('ilman reaaliaikatietoa näytetään pysäkin oma aikataulu', () {
+      final leg = makeLeg(
+        intermediateStops: scheduledStops,
+        legStopIds: twoStopIds,
+      );
+
+      final a = intermediateStopTime(0, leg, null);
+      expect(a.time, DateTime(2026, 6, 11, 12, 3, 20));
+      expect(a.kind, StopTimeKind.schedule);
+    });
+
+    test('hakuhetken pysäkkiennuste ohittaa lähtöviiveen siirron', () {
+      final leg = makeLeg(
+        realtimeDeparture: DateTime(2026, 6, 11, 12, 1),
+        isRealtime: true,
+        intermediateStops: scheduledStops,
+        legStopIds: twoStopIds,
+      );
+
+      // A:lla ei ennustetta: aikataulu + lähtöviive 1 min.
+      final a = intermediateStopTime(0, leg, null);
+      expect(a.time, DateTime(2026, 6, 11, 12, 4, 20));
+      expect(a.kind, StopTimeKind.estimate);
+      // B:llä oma ennuste (viive kasvanut matkalla 3 minuuttiin).
+      expect(
+        intermediateStopTime(1, leg, null).time,
+        DateTime(2026, 6, 11, 12, 29),
+      );
+    });
+
+    test('live-lähtöviive siirtää pysäkin aikataulua', () {
+      final leg = makeLeg(
+        intermediateStops: scheduledStops,
+        legStopIds: twoStopIds,
       );
       final data = realtimeMap(
         stopId: 'OULU:201',
         departure: DateTime(2026, 6, 11, 12, 5),
       );
 
-      expect(intermediateStopTimeLabel(0, leg, data, fmt), '12:15');
+      final a = intermediateStopTime(0, leg, data);
+      expect(a.time, DateTime(2026, 6, 11, 12, 8, 20));
+      expect(a.kind, StopTimeKind.estimate);
     });
 
-    test('käyttää reaaliaikaista aikaa kun se on saatavilla', () {
+    test('saapumisajan lähde: aikataulu, arvio tai live', () {
       final leg = makeLeg(
-        intermediateStops: [
-          IntermediateStop(name: 'A', lat: 0, lon: 0),
-          IntermediateStop(name: 'B', lat: 0, lon: 0),
-        ],
-      );
-      // Arvio pysäkille on 12:10, reaaliaikainen 12:13.
-      final data = realtimeMap(
-        stopId: 'OULU:202',
-        departure: DateTime(2026, 6, 11, 12, 13),
+        intermediateStops: scheduledStops,
+        legStopIds: twoStopIds,
       );
 
-      expect(intermediateStopTimeLabel(0, leg, data, fmt), '12:13');
+      expect(
+        displayedLegArrivalEstimate(leg, null).kind,
+        StopTimeKind.schedule,
+      );
+      expect(
+        displayedLegArrivalEstimate(
+          makeLeg(
+            realtimeDeparture: DateTime(2026, 6, 11, 12, 2),
+            isRealtime: true,
+          ),
+          null,
+        ).kind,
+        StopTimeKind.estimate,
+      );
+      final arrived = realtimeMap(
+        stopId: 'OULU:205',
+        arrival: DateTime(2026, 6, 11, 12, 31),
+      );
+      final live = displayedLegArrivalEstimate(leg, arrived);
+      expect(live.kind, StopTimeKind.live);
+      expect(live.time, DateTime(2026, 6, 11, 12, 31));
     });
 
-    test('hylkää eri liikennöintipäivän ajan ja käyttää arviota', () {
+    test('live-ennuste pysäkillä on tarkin', () {
       final leg = makeLeg(
-        intermediateStops: [
-          IntermediateStop(name: 'A', lat: 0, lon: 0),
-          IntermediateStop(name: 'B', lat: 0, lon: 0),
-        ],
+        intermediateStops: scheduledStops,
+        legStopIds: twoStopIds,
       );
       final data = realtimeMap(
-        stopId: 'OULU:202',
-        departure: DateTime(2026, 6, 10, 12, 13),
+        stopId: 'OULU:203',
+        departure: DateTime(2026, 6, 11, 12, 27),
       );
 
-      expect(intermediateStopTimeLabel(0, leg, data, fmt), '12:10');
+      final b = intermediateStopTime(1, leg, data);
+      expect(b.time, DateTime(2026, 6, 11, 12, 27));
+      expect(b.kind, StopTimeKind.live);
+    });
+  });
+
+  group('legProgress', () {
+    // Lähtö 12:00, A ~12:10, B ~12:20, perillä 12:30.
+    final leg = makeLeg(intermediateStops: twoStops, legStopIds: twoStopIds);
+
+    test('ennen lähtöä mitään ei ole ohitettu', () {
+      final p = legProgress(leg, null, DateTime(2026, 6, 11, 12, 0, 30));
+
+      expect(p.hasDeparted, isFalse);
+      expect(p.passedStops, 0);
+    });
+
+    test('matkalla ohitetut pysäkit lasketaan alusta', () {
+      final p = legProgress(leg, null, DateTime(2026, 6, 11, 12, 15));
+
+      expect(p.hasDeparted, isTrue);
+      expect(p.passedStops, 1); // A ohitettu, B seuraavaksi
+      expect(p.hasArrived, isFalse);
+      expect(p.isLive, isFalse);
+    });
+
+    test('live-ennuste ratkaisee, onko pysäkki ohitettu', () {
+      // Bussi myöhässä: A vasta 12:17 live-ennusteen mukaan.
+      final data = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(departure: DateTime(2026, 6, 11, 12, 7)),
+            'OULU:202': StopRealtime(departure: DateTime(2026, 6, 11, 12, 17)),
+          },
+        ),
+      };
+
+      final p = legProgress(leg, data, DateTime(2026, 6, 11, 12, 15));
+
+      expect(p.hasDeparted, isTrue);
+      expect(p.passedStops, 0);
+      expect(p.isLive, isTrue);
+    });
+
+    test('perillä kaikki pysäkit on ohitettu', () {
+      final p = legProgress(leg, null, DateTime(2026, 6, 11, 12, 31));
+
+      expect(p.passedStops, 2);
+      expect(p.hasArrived, isTrue);
+    });
+  });
+
+  group('tripStatus', () {
+    // Lähde 11:55, bussi 12:00 (ks. realArrivalTime-ryhmä).
+    RouteOption option({DateTime? realtimeDeparture}) => RouteOption(
+      leaveHomeTime: DateTime(2026, 6, 11, 11, 55),
+      arrivalTime: DateTime(2026, 6, 11, 12, 40),
+      busLegs: [
+        makeLeg(
+          realtimeDeparture: realtimeDeparture,
+          isRealtime: realtimeDeparture != null,
+        ),
+      ],
+      segments: [],
+    );
+
+    test('yli 5 min ennen lähtöä', () {
+      final s = tripStatus(option(), null, DateTime(2026, 6, 11, 11, 40));
+
+      expect(s.phase, TripPhase.leaveLater);
+      expect(s.minutesToLeave, 15);
+    });
+
+    test('lähtöön alle 5 min', () {
+      final s = tripStatus(option(), null, DateTime(2026, 6, 11, 11, 52, 30));
+
+      expect(s.phase, TripPhase.leaveSoon);
+      expect(s.minutesToLeave, 3);
+    });
+
+    test('lähtöaika mennyt, bussi ei vielä lähtenyt', () {
+      final s = tripStatus(option(), null, DateTime(2026, 6, 11, 11, 58));
+
+      expect(s.phase, TripPhase.leaveNow);
+      expect(s.busDeparture, DateTime(2026, 6, 11, 12, 0));
+    });
+
+    test('myöhässä oleva bussi siirtää lähtöaikaa ja lähtöä', () {
+      // Bussi 8 min myöhässä: lähde 12:03, bussi 12:08.
+      final late = option(realtimeDeparture: DateTime(2026, 6, 11, 12, 8));
+
+      expect(
+        tripStatus(late, null, DateTime(2026, 6, 11, 11, 58)).minutesToLeave,
+        5,
+      );
+      expect(
+        tripStatus(late, null, DateTime(2026, 6, 11, 12, 5)).phase,
+        TripPhase.leaveNow,
+      );
+    });
+
+    test('bussi lähtenyt', () {
+      final s = tripStatus(option(), null, DateTime(2026, 6, 11, 12, 1));
+
+      expect(s.phase, TripPhase.departed);
+    });
+  });
+
+  group('legDepartureSource', () {
+    test('live, hakuhetken ennuste tai aikataulu', () {
+      final data = realtimeMap(
+        stopId: 'OULU:201',
+        departure: DateTime(2026, 6, 11, 12, 2),
+      );
+
+      expect(legDepartureSource(makeLeg(), data), RealtimeSource.live);
+      expect(
+        legDepartureSource(
+          makeLeg(
+            realtimeDeparture: DateTime(2026, 6, 11, 12, 2),
+            isRealtime: true,
+          ),
+          null,
+        ),
+        RealtimeSource.snapshot,
+      );
+      expect(legDepartureSource(makeLeg(), null), RealtimeSource.schedule);
+    });
+  });
+
+  group('nextSameLineDeparture', () {
+    RouteOption option(String tripId, DateTime dep, {String bus = '20'}) =>
+        RouteOption(
+          leaveHomeTime: dep.subtract(const Duration(minutes: 5)),
+          arrivalTime: dep.add(const Duration(minutes: 30)),
+          busLegs: [
+            makeLeg(tripId: tripId, departureTime: dep, busNumber: bus),
+          ],
+          segments: [],
+        );
+
+    test('löytää saman linjan seuraavan lähdön samalta pysäkiltä', () {
+      final options = [
+        option('OULU:1', DateTime(2026, 6, 11, 12, 0)),
+        option('OULU:2', DateTime(2026, 6, 11, 12, 10), bus: '22'),
+        option('OULU:3', DateTime(2026, 6, 11, 12, 30)),
+        option('OULU:4', DateTime(2026, 6, 11, 12, 15)),
+      ];
+
+      expect(
+        nextSameLineDeparture(options, 0, null, DateTime(2026, 6, 11, 11, 50)),
+        DateTime(2026, 6, 11, 12, 15),
+      );
+    });
+
+    test('ei tarjoa jo lähtenyttä vuoroa', () {
+      final options = [
+        option('OULU:1', DateTime(2026, 6, 11, 12, 0)),
+        option('OULU:4', DateTime(2026, 6, 11, 12, 15)),
+        option('OULU:5', DateTime(2026, 6, 11, 12, 45)),
+      ];
+
+      expect(
+        nextSameLineDeparture(options, 0, null, DateTime(2026, 6, 11, 12, 20)),
+        DateTime(2026, 6, 11, 12, 45),
+      );
+    });
+
+    test('ohittaa perutut lähdöt ja palauttaa null, jos muita ei ole', () {
+      final options = [
+        option('OULU:1', DateTime(2026, 6, 11, 12, 0)),
+        option('OULU:4', DateTime(2026, 6, 11, 12, 15)),
+      ];
+      final canceled = {
+        'OULU:4': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(realtimeState: 'CANCELED'),
+            'OULU:205': StopRealtime(realtimeState: 'CANCELED'),
+          },
+        ),
+      };
+
+      expect(
+        nextSameLineDeparture(
+          options,
+          0,
+          canceled,
+          DateTime(2026, 6, 11, 11, 50),
+        ),
+        isNull,
+      );
     });
   });
 }

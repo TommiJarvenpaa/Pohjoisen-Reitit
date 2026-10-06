@@ -239,7 +239,11 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
                       color: isStopCanceled
                           ? Colors.grey
                           : isRealtime && !isPast
-                          ? (delayMin > 0 ? kDelayed : kOnTime)
+                          ? (delayMin > 0
+                                ? kDelayed
+                                : delayMin < 0
+                                ? kEarly
+                                : kOnTime)
                           : textColor,
                       decoration: isStopCanceled
                           ? TextDecoration.lineThrough

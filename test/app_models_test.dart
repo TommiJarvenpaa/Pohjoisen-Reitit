@@ -51,6 +51,39 @@ void main() {
       expect(restored.patternCode, 'OULU:20:0:01');
     });
 
+    test('välipysäkin aikataulu ja ennuste säilyvät välimuistissa', () {
+      final leg = makeLeg().copyWith(
+        intermediateStops: [
+          IntermediateStop(
+            name: 'Kauppuri',
+            lat: 65.02,
+            lon: 25.47,
+            gtfsId: 'OULU:202',
+            scheduledTime: DateTime(2026, 6, 11, 12, 3, 20),
+            estimatedTime: DateTime(2026, 6, 11, 12, 5),
+          ),
+        ],
+      );
+
+      final stop = BusLeg.fromJson(leg.toJson()).intermediateStops.single;
+
+      expect(stop.scheduledTime, DateTime(2026, 6, 11, 12, 3, 20));
+      expect(stop.estimatedTime, DateTime(2026, 6, 11, 12, 5));
+      expect(stop.withoutEstimate().estimatedTime, isNull);
+      expect(stop.withoutEstimate().scheduledTime, stop.scheduledTime);
+    });
+
+    test('vanhan välimuistin välipysäkiltä puuttuvat ajat', () {
+      final stop = IntermediateStop.fromJson({
+        'name': 'Kauppuri',
+        'lat': 65.02,
+        'lon': 25.47,
+      });
+
+      expect(stop.scheduledTime, isNull);
+      expect(stop.estimatedTime, isNull);
+    });
+
     test('fromJson sietää vanhan välimuistin ilman päivää ja patternia', () {
       final json = makeLeg().toJson()
         ..remove('serviceDate')

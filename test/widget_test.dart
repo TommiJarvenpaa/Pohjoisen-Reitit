@@ -101,15 +101,15 @@ void main() {
               leg: leg,
               formatTime: _fmt,
               tripRealtime: tripRealtime,
+              now: DateTime(2026, 6, 11, 11, 0),
             ),
           ),
         ),
       );
 
-      // Viive näkyy: aikataulun aika, reaaliaikainen aika ja viivemerkki.
-      expect(find.text('12:00'), findsOneWidget);
+      // Viive näkyy: reaaliaikainen aika ja viivemerkki.
       expect(find.text('12:05'), findsOneWidget);
-      expect(find.text('+5 min'), findsOneWidget);
+      expect(find.text('5 min myöhässä'), findsOneWidget);
     },
   );
 
@@ -146,6 +146,7 @@ void main() {
           leg: leg,
           formatTime: _fmt,
           tripRealtime: tripRealtime,
+          now: DateTime(2026, 10, 6, 7, 0),
         ),
       ),
     ),
@@ -164,9 +165,8 @@ void main() {
       ),
     );
 
-    expect(find.text('07:46'), findsOneWidget);
     expect(find.text('07:54'), findsOneWidget);
-    expect(find.text('+8 min'), findsOneWidget);
+    expect(find.text('8 min myöhässä'), findsOneWidget);
   });
 
   testWidgets('ohitettu nousupysäkki näkyy, ei "ajallaan"-aikana', (
@@ -185,7 +185,7 @@ void main() {
     });
 
     expect(find.text('Ei pysähdy'), findsOneWidget);
-    expect(find.text('PERUTTU'), findsNothing);
+    expect(find.text('peruttu'), findsNothing);
   });
 
   Future<void> pumpCard(
@@ -206,6 +206,7 @@ void main() {
             onToggleFavorite: () {},
             onShare: () {},
             tripRealtime: tripRealtime,
+            now: DateTime(2026, 10, 6, 7, 0),
           ),
         ),
       ),
@@ -232,7 +233,10 @@ void main() {
     await tester.tap(find.text('Näytä tiedot'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Lähde klo 07:51 (aikataulu 07:43)'), findsOneWidget);
+    expect(
+      find.text('Lähde klo 07:51  aikataulu 07:43', findRichText: true),
+      findsOneWidget,
+    );
   });
 
   testWidgets('peruttu vaihe näkyy kortin varoituksena ilman vaihtomerkintää', (
@@ -273,7 +277,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Reitin bussivuoro on peruttu'), findsOneWidget);
-    expect(find.text('PERUTTU'), findsOneWidget);
+    // Merkki sekä suljetun kortin linjarivillä että vaiheen lähtörivillä.
+    expect(find.text('peruttu'), findsNWidgets(2));
     // 1 min vaihto olisi muuten "tiukka" – perutulle vaiheelle ei näytetä.
     expect(find.textContaining('tiukka'), findsNothing);
   });
@@ -334,7 +339,7 @@ void main() {
     expect(find.text('Ei pysähdy'), findsOneWidget);
   });
 
-  testWidgets('peruttu vuoro näkyy PERUTTU-merkintänä', (tester) async {
+  testWidgets('peruttu vuoro näkyy peruttu-merkintänä', (tester) async {
     final leg = makeLeg();
     await pumpSection(tester, leg, {
       'OULU:111': TripRealtime(
@@ -351,6 +356,6 @@ void main() {
       ),
     });
 
-    expect(find.text('PERUTTU'), findsOneWidget);
+    expect(find.text('peruttu'), findsOneWidget);
   });
 }
