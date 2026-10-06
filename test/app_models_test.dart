@@ -24,6 +24,8 @@ BusLeg makeLeg() => BusLeg(
     IntermediateStop(name: 'Kauppuri', lat: 65.02, lon: 25.47, gtfsId: 'OULU:202'),
   ],
   alerts: [AlertInfo(text: 'Poikkeusreitti')],
+  serviceDate: '20260611',
+  patternCode: 'OULU:20:0:01',
 );
 
 void main() {
@@ -45,6 +47,19 @@ void main() {
       expect(restored.intermediateStops.single.name, 'Kauppuri');
       expect(restored.intermediateStops.single.gtfsId, 'OULU:202');
       expect(restored.alerts.single.text, 'Poikkeusreitti');
+      expect(restored.serviceDate, '20260611');
+      expect(restored.patternCode, 'OULU:20:0:01');
+    });
+
+    test('fromJson sietää vanhan välimuistin ilman päivää ja patternia', () {
+      final json = makeLeg().toJson()
+        ..remove('serviceDate')
+        ..remove('patternCode');
+
+      final restored = BusLeg.fromJson(json);
+
+      expect(restored.serviceDate, isEmpty);
+      expect(restored.patternCode, isEmpty);
     });
 
     test('fromJson sietää sekalaiset legStopIds-arvot', () {
@@ -88,6 +103,7 @@ void main() {
           RouteSegment(points: const [], isWalk: true),
         ],
         walkDistances: const [120.0, 80.0],
+        walkDurations: const [Duration(seconds: 95), Duration(seconds: 60)],
       );
 
       final restored = RouteOption.fromJson(option.toJson());
@@ -96,6 +112,10 @@ void main() {
       expect(restored.arrivalTime, option.arrivalTime);
       expect(restored.busLegs.single.busNumber, '20');
       expect(restored.walkDistances, [120.0, 80.0]);
+      expect(restored.walkDurations, const [
+        Duration(seconds: 95),
+        Duration(seconds: 60),
+      ]);
     });
 
     test('fromJson sietää puuttuvat kentät (vanha välimuisti)', () {
@@ -107,6 +127,72 @@ void main() {
       expect(restored.busLegs, isEmpty);
       expect(restored.segments, isEmpty);
       expect(restored.walkDistances, isEmpty);
+      expect(restored.walkDurations, isEmpty);
+    });
+  });
+
+  group('StopTimeData.serviceDate', () {
+    test('muodostaa YYYYMMDD-päivän liikennöintipäivän alusta', () {
+      // OTP:n serviceDay = keskipäivä - 12 h paikallista aikaa.
+      final serviceDay =
+          DateTime(2026, 10, 6, 12).millisecondsSinceEpoch ~/ 1000 - 12 * 3600;
+      final st = StopTimeData(
+        scheduledEpochSec: serviceDay + 7 * 3600,
+        realtimeEpochSec: serviceDay + 7 * 3600,
+        realtimeState: 'SCHEDULED',
+        isRealtime: false,
+        serviceDayEpochSec: serviceDay,
+      );
+
+      expect(st.serviceDate, '20261006');
+    });
+
+    test('puuttuva serviceDay antaa tyhjän päivän', () {
+      final st = StopTimeData(
+        scheduledEpochSec: 0,
+        realtimeEpochSec: 0,
+        realtimeState: 'SCHEDULED',
+        isRealtime: false,
+      );
+
+      expect(st.serviceDate, isEmpty);
+    });
+  });
+
+  group('AlertInfo.isActiveBetween', () {
+    final from = DateTime(2026, 6, 11, 12, 0);
+    final to = DateTime(2026, 6, 11, 12, 30);
+
+    test('rajaamaton tiedote on aina voimassa', () {
+      expect(AlertInfo(text: 'x').isActiveBetween(from, to), isTrue);
+    });
+
+    test('päättynyt tai alkamaton tiedote ei ole voimassa', () {
+      expect(
+        AlertInfo(
+          text: 'x',
+          effectiveEnd: DateTime(2026, 6, 11, 11, 59),
+        ).isActiveBetween(from, to),
+        isFalse,
+      );
+      expect(
+        AlertInfo(
+          text: 'x',
+          effectiveStart: DateTime(2026, 6, 11, 12, 31),
+        ).isActiveBetween(from, to),
+        isFalse,
+      );
+    });
+
+    test('osittain päällekkäinen tiedote on voimassa', () {
+      expect(
+        AlertInfo(
+          text: 'x',
+          effectiveStart: DateTime(2026, 6, 11, 12, 20),
+          effectiveEnd: DateTime(2026, 6, 11, 14, 0),
+        ).isActiveBetween(from, to),
+        isTrue,
+      );
     });
   });
 

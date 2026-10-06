@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_models.dart';
 import '../providers/app_providers.dart';
+import '../services/realtime_utils.dart';
 import '../theme/app_colors.dart';
 import 'shimmer_widgets.dart';
 import 'route_card.dart'; // Tuodaan alkuperäinen, klikattava BusNumberBadge!
@@ -154,14 +155,22 @@ class _StopBoardSheetState extends ConsumerState<StopBoardSheet> {
       itemCount: _departures.length,
       itemBuilder: (context, index) {
         final dep = _departures[index];
+        final scheduledTime = DateTime.fromMillisecondsSinceEpoch(
+          dep.scheduledEpochSec * 1000,
+        );
         final depTime = DateTime.fromMillisecondsSinceEpoch(
           dep.realtimeEpochSec * 1000,
         );
+        final bool isCanceled = dep.isCanceled;
+        // Myöhässä vain, jos näytetty kellonaika poikkeaa aikataulusta.
         final bool isDelayed =
-            dep.isRealtime && dep.realtimeEpochSec > dep.scheduledEpochSec;
+            !isCanceled &&
+            dep.isRealtime &&
+            clockMinutesBetween(scheduledTime, depTime) > 0;
 
         // Luodaan "vale-BussiMatka", jotta voimme käyttää reittikortin
-        // älykästä ja klikattavaa BusNumberBadgea.
+        // älykästä ja klikattavaa BusNumberBadgea. departureTime on
+        // aikataulun mukainen, kuten reittikortin vaiheissa.
         final dummyLeg = BusLeg(
           busNumber: dep.busNumber ?? '',
           routeGtfsId: dep.routeGtfsId,
@@ -171,34 +180,50 @@ class _StopBoardSheetState extends ConsumerState<StopBoardSheet> {
           toStop: dep.headsign ?? '',
           toStopId: '', // Tyhjä = Koko reitti -näkymä näyttää päätepysäkille asti!
           legStopIds: [widget.stopId],
-          departureTime: depTime,
-          arrivalTime: depTime,
+          departureTime: scheduledTime,
+          arrivalTime: scheduledTime,
           realtimeDeparture: depTime,
           realtimeState: dep.realtimeState,
           isRealtime: dep.isRealtime,
           stayOnBus: false,
           intermediateStops: const [],
           alerts: const [],
+          serviceDate: dep.serviceDate,
         );
 
         return ListTile(
           leading: BusNumberBadge(leg: dummyLeg, formatTime: widget.formatTime),
-          title: Text(dep.headsign ?? ''),
+          title: Text(
+            dep.headsign ?? '',
+            style: isCanceled ? const TextStyle(color: Colors.grey) : null,
+          ),
           trailing: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                widget.formatTime(depTime),
+                widget.formatTime(isCanceled ? scheduledTime : depTime),
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 16,
-                  color: isDelayed
+                  decoration: isCanceled ? TextDecoration.lineThrough : null,
+                  color: isCanceled
+                      ? Colors.grey
+                      : isDelayed
                       ? kDelayed
                       : (dep.isRealtime ? kOnTime : Colors.black87),
                 ),
               ),
-              if (dep.isRealtime)
+              if (isCanceled)
+                const Text(
+                  'Peruttu',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: kDelayed,
+                  ),
+                )
+              else if (dep.isRealtime)
                 Icon(
                   Icons.rss_feed,
                   size: 12,

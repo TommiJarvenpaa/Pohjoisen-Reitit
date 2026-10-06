@@ -48,7 +48,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   void initState() {
     super.initState();
     _loadUiState();
-    _determinePosition();
+    // Asetukset latautumaan heti, jotta ensimmäinenkin haku käyttää niitä.
+    ref.read(minTransferTimeProvider);
+    ref.read(walkSpeedProvider);
+    _locateAndRefreshCachedRoute();
     _stopSearchController.addListener(() {
       setState(() => _stopSearchQuery = _stopSearchController.text);
       _rebuildStopMarkers();
@@ -82,6 +85,90 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _stopSearchController.dispose();
     _sheetController.dispose();
     super.dispose();
+  }
+
+  /// Välimuistin reitin päivitys odottaa hidasta GPS-sijaintia.
+  bool _refreshCachedRouteWhenLocated = false;
+
+  /// Käynnistyksessä: haetaan sijainti ja päivitetään sen jälkeen
+  /// välimuistista ladattu reitti, jos sellainen on ruudulla. Hidasta GPS:ää
+  /// odotetaan 10 s; sen jälkeen GPS-lähtöinen päivitys tehdään vasta, kun
+  /// sijainti saadaan (tai sen haku epäonnistuu).
+  Future<void> _locateAndRefreshCachedRoute() async {
+    final Future<void> locating = _determinePosition();
+    bool isLocationPending = false;
+    try {
+      await locating.timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      isLocationPending = true;
+    } catch (e) {
+      debugPrint('Location lookup failed before cached route refresh: $e');
+    }
+    if (!mounted) return;
+
+    await _refreshCachedRoute(waitForLocation: isLocationPending);
+    if (_refreshCachedRouteWhenLocated) {
+      locating
+          .catchError((Object e) {
+            debugPrint('Location lookup failed: $e');
+          })
+          .whenComplete(_runPendingCachedRefresh);
+    }
+  }
+
+  void _runPendingCachedRefresh() {
+    if (!mounted || !_refreshCachedRouteWhenLocated) return;
+    _refreshCachedRouteWhenLocated = false;
+    _refreshCachedRoute();
+  }
+
+  /// Päivittää välimuistin reitin ("Tallennettu reitti – ei reaaliaikainen")
+  /// tekemällä saman haun uudelleen. Ilman verkkoyhteyttä haku epäonnistuu
+  /// hiljaa ja välimuistin reitit jäävät näkyviin.
+  Future<void> _refreshCachedRoute({bool waitForLocation = false}) async {
+    try {
+      final saved = await ref.read(routeStateProvider.notifier).savedSearch();
+      if (!mounted || saved == null) return;
+      // Haku käyttää tallennettuja asetuksia, ei oletusarvoja.
+      await Future.wait([
+        ref.read(minTransferTimeProvider.notifier).loaded,
+        ref.read(walkSpeedProvider.notifier).loaded,
+      ]);
+      if (!mounted) return;
+
+      // Käyttäjä ehti jo aloittaa oman haun – ei ohiteta hänen valintojaan.
+      if (ref.read(destinationLocationProvider) != null ||
+          ref.read(startLocationProvider) != null ||
+          ref.read(routeStateProvider).isLoading ||
+          _isSelectingStart) {
+        return;
+      }
+
+      // GPS-lähtö ilman sijaintia: odotetaan sijaintia, tai jos sitä ei
+      // saada, käytetään viimeksi haussa käytettyä lähtöpistettä eikä kartan
+      // oletuskeskipistettä.
+      LatLng? fallbackStart;
+      if (saved.start == null && !_hasRealLocation) {
+        if (waitForLocation) {
+          _refreshCachedRouteWhenLocated = true;
+          return;
+        }
+        if (saved.startLat == null || saved.startLon == null) return;
+        fallbackStart = LatLng(saved.startLat!, saved.startLon!);
+      }
+
+      ref.read(destinationLocationProvider.notifier).state = saved.destination;
+      ref.read(startLocationProvider.notifier).state = saved.start;
+      // Tulevaan hetkeen tehty haku päivitetään samalle ajalle; mennyt tai
+      // "nyt"-haku päivitetään nykyhetkeen.
+      final DateTime? savedTime = saved.departureTime;
+      if (savedTime != null && savedTime.isAfter(DateTime.now())) {
+        ref.read(departureTimeProvider.notifier).state = savedTime;
+      }
+      _triggerSearch(isBackgroundRefresh: true, fallbackStart: fallbackStart);
+    } catch (e) {
+      debugPrint('Cached route refresh failed: $e');
+    }
   }
 
   Future<void> _determinePosition() async {
@@ -165,7 +252,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     ref.read(startLocationProvider.notifier).state = null;
-    ref.read(departureTimeProvider.notifier).state = DateTime.now();
+    ref.read(departureTimeProvider.notifier).state = null;
     _triggerSearch();
   }
 
@@ -177,7 +264,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _triggerSearch();
   }
 
-  void _triggerSearch({bool closePanel = false}) {
+  /// [isBackgroundRefresh]: välimuistin reitin päivitys, ks.
+  /// [RouteNotifier.searchRoute]. [fallbackStart] korvaa GPS-sijainnin,
+  /// jos lähtöpistettä ei ole valittu eikä oikeaa sijaintia ole saatu.
+  void _triggerSearch({
+    bool closePanel = false,
+    bool isBackgroundRefresh = false,
+    LatLng? fallbackStart,
+  }) {
     final dest = ref.read(destinationLocationProvider);
     if (dest == null) return;
 
@@ -190,12 +284,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     final start = ref.read(startLocationProvider);
-    final time = ref.read(departureTimeProvider);
+    // Null = "nyt" hakuhetkellä, ks. departureTimeProvider.
+    final DateTime? chosenTime = ref.read(departureTimeProvider);
+    final time = chosenTime ?? DateTime.now();
     final transTime = ref.read(minTransferTimeProvider);
     final speed = ref.read(walkSpeedProvider);
 
-    double sLat = start?.lat ?? _currentLocation.latitude;
-    double sLon = start?.lon ?? _currentLocation.longitude;
+    final LatLng gpsStart = fallbackStart != null && !_hasRealLocation
+        ? fallbackStart
+        : _currentLocation;
+    double sLat = start?.lat ?? gpsStart.latitude;
+    double sLon = start?.lon ?? gpsStart.longitude;
 
     ref
         .read(routeStateProvider.notifier)
@@ -208,6 +307,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           transTime,
           speed,
           destPlace: dest,
+          startPlace: start,
+          chosenTime: chosenTime,
+          isBackgroundRefresh: isBackgroundRefresh,
         )
         .then((_) {
           // Uusien reittiehdotusten viiveet heti, ei vasta seuraavalla
@@ -424,26 +526,41 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     final liveState = ref.read(liveBusProvider);
+    final tripRealtime = liveState.tripRealtime;
     // Sama laskenta kuin reittikortissa, jotta jaettu aika ei eroa näytöstä.
-    final DateTime realArrival = realArrivalTime(
-      option,
-      liveState.tripRealtime,
-    );
+    final DateTime realArrival = realArrivalTime(option, tripRealtime);
 
     final buf = StringBuffer();
 
-    final totalMinutes = realArrival.difference(option.leaveHomeTime).inMinutes;
+    final DateTime leaveTime = displayedLeaveTime(option, tripRealtime);
+    final totalMinutes = clockMinutesBetween(leaveTime, realArrival);
 
     buf.writeln('🚌 Pohjoisen Reitit');
     buf.writeln('⏱ Matka-aika $totalMinutes min');
+    buf.writeln('🚶 Lähde klo ${_formatTime(leaveTime)}');
     buf.writeln('');
 
     for (int i = 0; i < option.busLegs.length; i++) {
       final leg = option.busLegs[i];
+      final LegCancellation cancellation = legCancellation(leg, tripRealtime);
+      final DateTime departure =
+          realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
+      final bool isDelayed =
+          clockMinutesBetween(leg.departureTime, departure) != 0;
 
-      buf.writeln('🚌 Linja ${leg.busNumber}');
-      buf.writeln('${_formatTime(leg.departureTime)} ${leg.fromStop}');
-      buf.writeln('${_formatTime(leg.arrivalTime)} ${leg.toStop}');
+      buf.writeln(
+        '🚌 Linja ${leg.busNumber}'
+        '${cancellation == LegCancellation.canceled ? ' – PERUTTU' : ''}',
+      );
+      buf.writeln(
+        '${_formatTime(departure)} ${leg.fromStop}'
+        '${isDelayed ? ' (aikataulu ${_formatTime(leg.departureTime)})' : ''}'
+        '${cancellation == LegCancellation.boardingSkipped ? ' – ei pysähdy' : ''}',
+      );
+      buf.writeln(
+        '${_formatTime(displayedLegArrival(leg, tripRealtime))} ${leg.toStop}'
+        '${cancellation == LegCancellation.alightingSkipped ? ' – ei pysähdy' : ''}',
+      );
       buf.writeln('');
     }
 
@@ -454,7 +571,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   Future<void> _pickDepartureTime() async {
-    final current = ref.read(departureTimeProvider);
+    final current = ref.read(departureTimeProvider) ?? DateTime.now();
     final TimeOfDay? pickedTime = await showTimePicker(
       context: context,
       initialTime: TimeOfDay(hour: current.hour, minute: current.minute),
@@ -472,7 +589,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   Future<void> _pickDepartureDate() async {
-    final current = ref.read(departureTimeProvider);
+    final current = ref.read(departureTimeProvider) ?? DateTime.now();
     final DateTime? pickedDate = await showDatePicker(
       context: context,
       initialDate: current,
@@ -858,11 +975,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final favs = ref.watch(favoritesProvider);
 
     final now = DateTime.now();
-    final bool isToday =
-        time.year == now.year && time.month == now.month && time.day == now.day;
-    final String timeLabel = isToday
-        ? 'Tänään ${_formatTime(time)}'
-        : '${_formatDate(time)} klo ${_formatTime(time)}';
+    final String timeLabel;
+    if (time == null) {
+      timeLabel = 'Nyt';
+    } else if (time.year == now.year &&
+        time.month == now.month &&
+        time.day == now.day) {
+      timeLabel = 'Tänään ${_formatTime(time)}';
+    } else {
+      timeLabel = '${_formatDate(time)} klo ${_formatTime(time)}';
+    }
 
     return AnimatedSize(
       duration: const Duration(milliseconds: 280),
@@ -1433,18 +1555,30 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                   color: Colors.orange.withValues(alpha: 0.12),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
-                                child: const Row(
+                                child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Icon(
-                                      Icons.wifi_off,
-                                      size: 12,
-                                      color: Colors.orange,
-                                    ),
-                                    SizedBox(width: 4),
+                                    if (state.isRefreshing)
+                                      const SizedBox(
+                                        width: 10,
+                                        height: 10,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 1.5,
+                                          color: Colors.orange,
+                                        ),
+                                      )
+                                    else
+                                      const Icon(
+                                        Icons.wifi_off,
+                                        size: 12,
+                                        color: Colors.orange,
+                                      ),
+                                    const SizedBox(width: 4),
                                     Text(
-                                      'Offline',
-                                      style: TextStyle(
+                                      state.isRefreshing
+                                          ? 'Päivitetään…'
+                                          : 'Offline',
+                                      style: const TextStyle(
                                         fontSize: 11,
                                         color: Colors.orange,
                                       ),

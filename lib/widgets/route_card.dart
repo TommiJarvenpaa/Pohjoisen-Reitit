@@ -115,25 +115,50 @@ class _RouteCardState extends State<RouteCard> {
 
   @override
   Widget build(BuildContext context) {
+    // Vain vaiheen aikana voimassa olevat tiedotteet; sama tiedote voi
+    // koskea useaa vaihetta (esim. pysäkkitiedote).
+    final Set<String> seenAlertTexts = {};
     final allAlerts = widget.option.busLegs
-        .expand((leg) => leg.alerts)
+        .expand((leg) => activeLegAlerts(leg, widget.tripRealtime))
+        .where((alert) => seenAlertTexts.add(alert.text))
         .toList();
+
+    final List<LegCancellation> cancellations = [
+      for (final leg in widget.option.busLegs)
+        legCancellation(leg, widget.tripRealtime),
+    ];
+    final bool hasCanceledLeg = cancellations.contains(
+      LegCancellation.canceled,
+    );
+    final bool hasSkippedStop = cancellations.any(
+      (c) =>
+          c == LegCancellation.boardingSkipped ||
+          c == LegCancellation.alightingSkipped,
+    );
 
     final DateTime realArrival = realArrivalTime(
       widget.option,
       widget.tripRealtime,
     );
+    // Lähtöaika seuraa ensimmäisen bussin viivettä kuten OTP:n
+    // reittiehdotukset; aikataulun mukainen aika näytetään rinnalla.
+    final DateTime leaveTime = displayedLeaveTime(
+      widget.option,
+      widget.tripRealtime,
+    );
+    final bool isLeaveShifted =
+        clockMinutesBetween(widget.option.leaveHomeTime, leaveTime) != 0;
 
-    final totalMinutes = realArrival
-        .difference(widget.option.leaveHomeTime)
-        .inMinutes;
+    final totalMinutes = clockMinutesBetween(leaveTime, realArrival);
 
     List<Widget> timelineWidgets = [];
     timelineWidgets.add(
       TimelineRow(
         icon: Icons.directions_walk,
         iconColor: kWalk,
-        label: 'Lähde klo ${widget.formatTime(widget.option.leaveHomeTime)}',
+        label:
+            'Lähde klo ${widget.formatTime(leaveTime)}'
+            '${isLeaveShifted ? ' (aikataulu ${widget.formatTime(widget.option.leaveHomeTime)})' : ''}',
         labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
       ),
     );
@@ -191,13 +216,25 @@ class _RouteCardState extends State<RouteCard> {
         );
       } else if (i + 1 < widget.option.busLegs.length) {
         final nextLeg = widget.option.busLegs[i + 1];
+        // Vaihtokävely on indeksissä i + 1 (kävely ennen vaihetta i + 1).
+        final walkDurations = widget.option.walkDurations;
         final int lateness = transferLatenessMinutes(
           leg,
           nextLeg,
           widget.tripRealtime,
+          transferWalk: i + 1 < walkDurations.length
+              ? walkDurations[i + 1]
+              : Duration.zero,
         );
+        // Perutun tai pysäkin ohittavan vaiheen vaihtoaika ei kerro mitään –
+        // peruutus näkyy omana varoituksenaan.
+        final bool isTransferMeaningful =
+            cancellations[i] == LegCancellation.none &&
+            cancellations[i + 1] == LegCancellation.none;
 
-        if (lateness > 0) {
+        if (!isTransferMeaningful) {
+          // Ei vaihtomerkintää.
+        } else if (lateness > 0) {
           timelineWidgets.add(const TimelineDivider());
           timelineWidgets.add(
             Padding(
@@ -373,11 +410,44 @@ class _RouteCardState extends State<RouteCard> {
                   ),
                 ),
 
+              if (hasCanceledLeg || hasSkippedStop)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: kDelayed.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: kDelayed.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.cancel_outlined, size: 14, color: kDelayed),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          hasCanceledLeg
+                              ? 'Reitin bussivuoro on peruttu'
+                              : 'Bussi ei pysähdy reitin pysäkillä',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: kDelayed,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
               Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    widget.formatTime(widget.option.leaveHomeTime),
+                    widget.formatTime(leaveTime),
                     style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w800,
@@ -656,41 +726,34 @@ class _BusLegSectionState extends State<BusLegSection> {
   @override
   Widget build(BuildContext context) {
     final BusLeg leg = widget.leg;
-    final bool isCanceled = leg.realtimeState == 'CANCELED';
     final bool hasIntermediateStops = leg.intermediateStops.isNotEmpty;
 
-    DateTime realtimeDep = leg.realtimeDeparture;
+    // Peruutus voi näkyä hakuhetken tilassa tai tulla live-seurannasta
+    // pysäkkikohtaisena tilana, ks. legCancellation.
+    final LegCancellation cancellation = legCancellation(
+      leg,
+      widget.tripRealtime,
+    );
+    final bool isCanceled = cancellation == LegCancellation.canceled;
+    final bool isBoardingStopCanceled =
+        cancellation == LegCancellation.boardingSkipped;
+    final bool isAlightingStopCanceled =
+        cancellation == LegCancellation.alightingSkipped;
+
     // Reaaliaikatieto voi tulla hakuhetken tilannekuvan lisäksi myös
     // live-seurannasta – esim. vaihtobussit eivät ole tilannekuvassa mukana.
-    bool hasRealtimeDep = leg.isRealtime;
-    final exactDep = getRealtimeStopTime(
-      widget.tripRealtime,
-      leg,
-      leg.fromStopId,
-    );
-    if (exactDep != null) {
-      realtimeDep = exactDep;
-      hasRealtimeDep = true;
-    }
+    final DateTime? liveDep = realtimeLegDeparture(leg, widget.tripRealtime);
+    final DateTime realtimeDep = liveDep ?? leg.departureTime;
 
-    final bool hasDelay =
-        hasRealtimeDep &&
-        realtimeDep.difference(leg.departureTime).inMinutes != 0;
-    final int delayMin = realtimeDep.difference(leg.departureTime).inMinutes;
+    // Minuutit lasketaan näytetyistä kellonajoista, jotta merkki täsmää
+    // niihin (07:46 → 07:54 on +8 min, vaikka sekunteina ero olisi 7:30).
+    final int delayMin = clockMinutesBetween(leg.departureTime, realtimeDep);
+    final bool hasDelay = liveDep != null && delayMin != 0;
 
-    DateTime finalBusArrivalTime = leg.arrivalTime.add(
-      hasRealtimeDep
-          ? realtimeDep.difference(leg.departureTime)
-          : Duration.zero,
-    );
-    final exactArrival = getRealtimeArrivalTime(
-      widget.tripRealtime,
+    final DateTime finalBusArrivalTime = displayedLegArrival(
       leg,
-      leg.toStopId,
+      widget.tripRealtime,
     );
-    if (exactArrival != null) {
-      finalBusArrivalTime = exactArrival;
-    }
 
     Widget cancelOrDelayWidget = const SizedBox.shrink();
 
@@ -702,6 +765,28 @@ class _BusLegSectionState extends State<BusLegSection> {
           fontWeight: FontWeight.bold,
           fontSize: 13,
         ),
+      );
+    } else if (isBoardingStopCanceled) {
+      cancelOrDelayWidget = Row(
+        children: [
+          Text(
+            widget.formatTime(leg.departureTime),
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+              decoration: TextDecoration.lineThrough,
+            ),
+          ),
+          const SizedBox(width: 5),
+          const Text(
+            'Ei pysähdy',
+            style: TextStyle(
+              color: kDelayed,
+              fontWeight: FontWeight.bold,
+              fontSize: 13,
+            ),
+          ),
+        ],
       );
     } else if (hasDelay) {
       cancelOrDelayWidget = Row(
@@ -911,9 +996,12 @@ class _BusLegSectionState extends State<BusLegSection> {
                   children: [
                     Text(
                       widget.formatTime(finalBusArrivalTime),
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontWeight: FontWeight.w600,
                         fontSize: 13,
+                        decoration: isAlightingStopCanceled || isCanceled
+                            ? TextDecoration.lineThrough
+                            : null,
                       ),
                     ),
                     const SizedBox(width: 4),
@@ -924,6 +1012,15 @@ class _BusLegSectionState extends State<BusLegSection> {
                         style: TextStyle(color: Colors.grey[600], fontSize: 12),
                       ),
                     ),
+                    if (isAlightingStopCanceled)
+                      const Text(
+                        'Ei pysähdy',
+                        style: TextStyle(
+                          color: kDelayed,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
                   ],
                 ),
               ],

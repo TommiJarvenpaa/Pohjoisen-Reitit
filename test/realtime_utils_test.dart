@@ -47,9 +47,16 @@ Map<String, TripRealtime> realtimeMap({
   required String stopId,
   DateTime? departure,
   DateTime? arrival,
+  String realtimeState = 'UPDATED',
 }) => {
   tripId: TripRealtime(
-    byStopId: {stopId: StopRealtime(departure: departure, arrival: arrival)},
+    byStopId: {
+      stopId: StopRealtime(
+        departure: departure,
+        arrival: arrival,
+        realtimeState: realtimeState,
+      ),
+    },
   ),
 };
 
@@ -107,14 +114,91 @@ void main() {
     });
 
     test('hylkää eri liikennöintipäivän ajan (sama vuoro, eri päivä)', () {
-      // Reititys-API:n stoptimes koskee kuluvaa liikennöintipäivää –
-      // huomisen samaa vuoroa katsottaessa tämän päivän ajat eivät kelpaa.
+      // Jos vaiheen päivä puuttuu (vanha välimuisti), OTP palauttaa
+      // kuluvan päivän ajat – toisen päivän samalle vuorolle ne eivät kelpaa.
       final data = realtimeMap(
         stopId: 'OULU:202',
         departure: DateTime(2026, 6, 10, 12, 16),
       );
 
       expect(getRealtimeStopTime(data, makeLeg(), 'OULU:202'), isNull);
+    });
+
+    test('perutun pysäkin aikaa ei näytetä "ajallaan"-tietona', () {
+      // OTP antaa perutulle pysäkille aikataulun ajan.
+      final data = realtimeMap(
+        stopId: 'OULU:201',
+        departure: DateTime(2026, 6, 11, 12, 0),
+        realtimeState: 'CANCELED',
+      );
+      final leg = makeLeg();
+
+      expect(getRealtimeStopTime(data, leg, 'OULU:201'), isNull);
+      expect(getRealtimeArrivalTime(data, leg, 'OULU:201'), isNull);
+      expect(isStopCanceled(data, leg, 'OULU:201'), isTrue);
+      expect(isStopCanceled(data, leg, 'OULU:205'), isFalse);
+    });
+  });
+
+  group('clockMinutesBetween', () {
+    test('laskee eron näytetyistä kellonajoista (kuvakaappauksen tapaus)', () {
+      // 07:46:40 → 07:54:10 näkyy "07:46 → 07:54": +8, ei +7.
+      expect(
+        clockMinutesBetween(
+          DateTime(2026, 10, 6, 7, 46, 40),
+          DateTime(2026, 10, 6, 7, 54, 10),
+        ),
+        8,
+      );
+      // 07:43:30 → 08:41:10 näkyy "07:43 → 08:41": 58 min, ei 57.
+      expect(
+        clockMinutesBetween(
+          DateTime(2026, 10, 6, 7, 43, 30),
+          DateTime(2026, 10, 6, 8, 41, 10),
+        ),
+        58,
+      );
+    });
+
+    test('saman minuutin sisällä ero on nolla, etuajassa negatiivinen', () {
+      expect(
+        clockMinutesBetween(
+          DateTime(2026, 10, 6, 7, 46, 0),
+          DateTime(2026, 10, 6, 7, 46, 50),
+        ),
+        0,
+      );
+      expect(
+        clockMinutesBetween(
+          DateTime(2026, 10, 6, 7, 46, 10),
+          DateTime(2026, 10, 6, 7, 45, 50),
+        ),
+        -1,
+      );
+    });
+  });
+
+  group('realtimeLegDeparture / displayedLegArrival', () {
+    test('live-seurannan aika ohittaa hakuhetken tilannekuvan', () {
+      final leg = makeLeg(
+        realtimeDeparture: DateTime(2026, 6, 11, 12, 8),
+        isRealtime: true,
+      );
+      final data = realtimeMap(
+        stopId: 'OULU:201',
+        departure: DateTime(2026, 6, 11, 12, 3),
+      );
+
+      expect(realtimeLegDeparture(leg, data), DateTime(2026, 6, 11, 12, 3));
+      // Saapuminen siirtyy live-viiveellä (3 min), ei tilannekuvan 8 min.
+      expect(displayedLegArrival(leg, data), DateTime(2026, 6, 11, 12, 33));
+    });
+
+    test('ilman reaaliaikatietoa palautuu aikataulu', () {
+      final leg = makeLeg();
+
+      expect(realtimeLegDeparture(leg, null), isNull);
+      expect(displayedLegArrival(leg, null), leg.arrivalTime);
     });
   });
 
@@ -240,6 +324,38 @@ void main() {
 
       expect(transferLatenessMinutes(prev, next, data), 2);
     });
+
+    test('vaihtokävely syö vaihtoajan', () {
+      final prev = makeLeg(); // saapuu 12:30
+      final next = makeLeg(
+        tripId: 'OULU:222',
+        departureTime: DateTime(2026, 6, 11, 12, 34),
+        realtimeDeparture: DateTime(2026, 6, 11, 12, 34),
+      );
+
+      // 4 min väliä, mutta pysäkkien välillä kävellään 5 min.
+      expect(
+        transferLatenessMinutes(
+          prev,
+          next,
+          null,
+          transferWalk: const Duration(minutes: 5),
+        ),
+        1,
+      );
+    });
+
+    test('pienikin myöhästyminen tarkoittaa, että vaihto voi jäädä', () {
+      final prev = makeLeg(); // saapuu 12:30:00
+      final next = makeLeg(
+        tripId: 'OULU:222',
+        departureTime: DateTime(2026, 6, 11, 12, 29, 30),
+        realtimeDeparture: DateTime(2026, 6, 11, 12, 29, 30),
+      );
+
+      // Aiemmin 30 s katkesi nollaksi ja näkyi vain "tiukka".
+      expect(transferLatenessMinutes(prev, next, null), 1);
+    });
   });
 
   group('realArrivalTime', () {
@@ -321,6 +437,23 @@ void main() {
       );
 
       expect(intermediateStopTimeLabel(0, leg, null, fmt), '12:15');
+    });
+
+    test('arvio käyttää samaa live-viivettä kuin lähtörivi', () {
+      // Tilannekuvassa ei viivettä, live-seuranta tietää 5 min viiveen
+      // lähtöpysäkillä mutta ei välipysäkeillä.
+      final leg = makeLeg(
+        intermediateStops: [
+          IntermediateStop(name: 'A', lat: 0, lon: 0),
+          IntermediateStop(name: 'B', lat: 0, lon: 0),
+        ],
+      );
+      final data = realtimeMap(
+        stopId: 'OULU:201',
+        departure: DateTime(2026, 6, 11, 12, 5),
+      );
+
+      expect(intermediateStopTimeLabel(0, leg, data, fmt), '12:15');
     });
 
     test('käyttää reaaliaikaista aikaa kun se on saatavilla', () {

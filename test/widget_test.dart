@@ -1,7 +1,15 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:pohjoisen_reitit/models/app_models.dart';
+import 'package:pohjoisen_reitit/providers/app_providers.dart';
+import 'package:pohjoisen_reitit/services/transit_service.dart';
 import 'package:pohjoisen_reitit/widgets/route_card.dart';
+import 'package:pohjoisen_reitit/widgets/trip_route_sheet.dart';
 
 String _fmt(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
@@ -104,4 +112,245 @@ void main() {
       expect(find.text('+5 min'), findsOneWidget);
     },
   );
+
+  BusLeg makeLeg({
+    DateTime? departure,
+    DateTime? realtimeDeparture,
+    bool isRealtime = false,
+  }) {
+    final dep = departure ?? DateTime(2026, 10, 6, 7, 46);
+    return BusLeg(
+      busNumber: '20K',
+      tripId: 'OULU:111',
+      fromStop: 'Kauppakuja E',
+      fromStopId: 'OULU:201',
+      toStop: 'Linja-autoasema',
+      toStopId: 'OULU:205',
+      legStopIds: const ['OULU:201', 'OULU:205'],
+      departureTime: dep,
+      arrivalTime: dep.add(const Duration(minutes: 50)),
+      realtimeDeparture: realtimeDeparture ?? dep,
+      realtimeState: 'UPDATED',
+      isRealtime: isRealtime,
+    );
+  }
+
+  Future<void> pumpSection(
+    WidgetTester tester,
+    BusLeg leg, [
+    Map<String, TripRealtime>? tripRealtime,
+  ]) => tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: BusLegSection(
+          leg: leg,
+          formatTime: _fmt,
+          tripRealtime: tripRealtime,
+        ),
+      ),
+    ),
+  );
+
+  testWidgets('viivemerkki täsmää näytettyihin kellonaikoihin', (
+    tester,
+  ) async {
+    // Kuvakaappauksen tapaus: aikataulu sekunteineen, ero 7 min 30 s.
+    await pumpSection(
+      tester,
+      makeLeg(
+        departure: DateTime(2026, 10, 6, 7, 46, 40),
+        realtimeDeparture: DateTime(2026, 10, 6, 7, 54, 10),
+        isRealtime: true,
+      ),
+    );
+
+    expect(find.text('07:46'), findsOneWidget);
+    expect(find.text('07:54'), findsOneWidget);
+    expect(find.text('+8 min'), findsOneWidget);
+  });
+
+  testWidgets('ohitettu nousupysäkki näkyy, ei "ajallaan"-aikana', (
+    tester,
+  ) async {
+    final leg = makeLeg();
+    await pumpSection(tester, leg, {
+      'OULU:111': TripRealtime(
+        byStopId: {
+          'OULU:201': StopRealtime(
+            departure: leg.departureTime,
+            realtimeState: 'CANCELED',
+          ),
+        },
+      ),
+    });
+
+    expect(find.text('Ei pysähdy'), findsOneWidget);
+    expect(find.text('PERUTTU'), findsNothing);
+  });
+
+  Future<void> pumpCard(
+    WidgetTester tester,
+    RouteOption option, [
+    Map<String, TripRealtime>? tripRealtime,
+  ]) => tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: RouteCard(
+            option: option,
+            isSelected: true,
+            isFavorite: false,
+            isOfflineData: false,
+            formatTime: _fmt,
+            onTap: () {},
+            onToggleFavorite: () {},
+            onShare: () {},
+            tripRealtime: tripRealtime,
+          ),
+        ),
+      ),
+    ),
+  );
+
+  testWidgets('lähtöaika seuraa bussin viivettä, aikataulu rinnalla', (
+    tester,
+  ) async {
+    final leg = makeLeg(
+      realtimeDeparture: DateTime(2026, 10, 6, 7, 54),
+      isRealtime: true,
+    );
+    await pumpCard(
+      tester,
+      RouteOption(
+        leaveHomeTime: DateTime(2026, 10, 6, 7, 43),
+        arrivalTime: leg.arrivalTime.add(const Duration(minutes: 5)),
+        busLegs: [leg],
+        segments: [],
+        walkDistances: const [268, 300],
+      ),
+    );
+    await tester.tap(find.text('Näytä tiedot'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Lähde klo 07:51 (aikataulu 07:43)'), findsOneWidget);
+  });
+
+  testWidgets('peruttu vaihe näkyy kortin varoituksena ilman vaihtomerkintää', (
+    tester,
+  ) async {
+    final first = makeLeg();
+    final second = BusLeg(
+      busNumber: '5',
+      tripId: 'OULU:222',
+      fromStop: 'Linja-autoasema',
+      fromStopId: 'OULU:205',
+      toStop: 'Yliopisto',
+      toStopId: 'OULU:300',
+      departureTime: first.arrivalTime.add(const Duration(minutes: 1)),
+      arrivalTime: first.arrivalTime.add(const Duration(minutes: 20)),
+      realtimeDeparture: first.arrivalTime.add(const Duration(minutes: 1)),
+      realtimeState: 'SCHEDULED',
+      isRealtime: false,
+    );
+    await pumpCard(
+      tester,
+      RouteOption(
+        leaveHomeTime: DateTime(2026, 10, 6, 7, 43),
+        arrivalTime: second.arrivalTime,
+        busLegs: [first, second],
+        segments: [],
+      ),
+      {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(realtimeState: 'CANCELED'),
+            'OULU:205': StopRealtime(realtimeState: 'CANCELED'),
+          },
+        ),
+      },
+    );
+    await tester.tap(find.text('Näytä tiedot'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Reitin bussivuoro on peruttu'), findsOneWidget);
+    expect(find.text('PERUTTU'), findsOneWidget);
+    // 1 min vaihto olisi muuten "tiukka" – perutulle vaiheelle ei näytetä.
+    expect(find.textContaining('tiukka'), findsNothing);
+  });
+
+  testWidgets('koko reitin näkymä näyttää perutun pysäkin, ei vihreää aikaa', (
+    tester,
+  ) async {
+    final serviceDay = DateTime(2026, 10, 6).millisecondsSinceEpoch ~/ 1000;
+    Map<String, dynamic> row(String id, String name, int secs, String state) =>
+        {
+          'stop': {'name': name, 'gtfsId': id, 'lat': 65.0, 'lon': 25.4},
+          'scheduledDeparture': secs,
+          'realtimeDeparture': secs,
+          'realtimeState': state,
+          'realtime': true,
+          'serviceDay': serviceDay,
+        };
+    final client = MockClient((request) async {
+      return http.Response(
+        json.encode({
+          'data': {
+            'trip': {
+              'stoptimesForDate': [
+                row('OULU:201', 'Kauppakuja E', 7 * 3600 + 46 * 60, 'UPDATED'),
+                row('OULU:202', 'Hukantie E', 7 * 3600 + 47 * 60, 'CANCELED'),
+                row('OULU:205', 'Linja-autoasema', 8 * 3600, 'UPDATED'),
+              ],
+            },
+          },
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          transitServiceProvider.overrideWithValue(
+            TransitService(
+              digitransitKey: 'k',
+              walttiClientId: 'i',
+              walttiClientSecret: 's',
+              client: client,
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: TripRouteSheet(leg: makeLeg(), formatTime: _fmt),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hukantie E'), findsOneWidget);
+    expect(find.text('Ei pysähdy'), findsOneWidget);
+  });
+
+  testWidgets('peruttu vuoro näkyy PERUTTU-merkintänä', (tester) async {
+    final leg = makeLeg();
+    await pumpSection(tester, leg, {
+      'OULU:111': TripRealtime(
+        byStopId: {
+          'OULU:201': StopRealtime(
+            departure: leg.departureTime,
+            realtimeState: 'CANCELED',
+          ),
+          'OULU:205': StopRealtime(
+            arrival: leg.arrivalTime,
+            realtimeState: 'CANCELED',
+          ),
+        },
+      ),
+    });
+
+    expect(find.text('PERUTTU'), findsOneWidget);
+  });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_models.dart';
 import '../providers/app_providers.dart';
+import '../services/realtime_utils.dart';
 import '../theme/app_colors.dart';
 
 class TripRouteSheet extends ConsumerStatefulWidget {
@@ -34,7 +35,7 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
       final api = ref.read(transitServiceProvider);
       final stops = await api.fetchTripRoute(
         widget.leg.tripId,
-        widget.leg.routeGtfsId,
+        serviceDate: widget.leg.serviceDate,
       );
 
       if (mounted) {
@@ -44,6 +45,7 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
         });
       }
     } catch (e) {
+      debugPrint('Trip route fetch error: $e');
       if (mounted) {
         setState(() {
           _error = 'Reitin hakeminen epäonnistui.';
@@ -157,14 +159,21 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
       userEndIndex = _tripStops!.length - 1;
     }
 
-    // --- AIKAVYÖHYKKEEN KORJAUS ---
-    // Lasketaan oikea "tämän päivän keskiyö" käyttäjän lähtöajan perusteella!
-    final int userStartSchedSecs =
-        _tripStops![userStartIndex]['scheduledDeparture'] as int? ?? 0;
-    final DateTime baseMidnight = widget.leg.departureTime.subtract(
-      Duration(seconds: userStartSchedSecs),
-    );
-    // ------------------------------
+    // Liikennöintipäivän alku. stoptimesForDate palauttaa oikean
+    // serviceDayn; varalla johdetaan se vaiheen aikataulun mukaisesta
+    // lähtöajasta (leg.departureTime on aikataulu, ei reaaliaika).
+    final int serviceDaySecs =
+        _tripStops![userStartIndex]['serviceDay'] as int? ?? 0;
+    final DateTime baseMidnight;
+    if (serviceDaySecs > 0) {
+      baseMidnight = DateTime.fromMillisecondsSinceEpoch(serviceDaySecs * 1000);
+    } else {
+      final int userStartSchedSecs =
+          _tripStops![userStartIndex]['scheduledDeparture'] as int? ?? 0;
+      baseMidnight = widget.leg.departureTime.subtract(
+        Duration(seconds: userStartSchedSecs),
+      );
+    }
 
     final bottomPadding = MediaQuery.of(context).padding.bottom;
 
@@ -179,10 +188,15 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
         final int schedSecs = stopData['scheduledDeparture'] as int? ?? 0;
         final int realSecs = stopData['realtimeDeparture'] as int? ?? schedSecs;
         final bool isRealtime = stopData['realtime'] ?? false;
+        // Perutulle pysäkille OTP antaa aikataulun ajan, joka näyttäisi
+        // muuten vihreältä "ajallaan"-tiedolta.
+        final bool isStopCanceled = stopData['realtimeState'] == 'CANCELED';
 
-        // PÄIVITETTY: Käytetään laskettua keskiyötä 1970-vuoden sijaan!
         DateTime scheduledTime = baseMidnight.add(Duration(seconds: schedSecs));
         DateTime displayTime = baseMidnight.add(Duration(seconds: realSecs));
+        // Myöhässä vain, jos näytetty kellonaika poikkeaa – muuten muutaman
+        // sekunnin viive värjäisi ajan punaiseksi.
+        final int delayMin = clockMinutesBetween(scheduledTime, displayTime);
 
         // Määritetään pysäkin visuaalinen tila
         bool isPast = index < userStartIndex;
@@ -215,16 +229,21 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    widget.formatTime(displayTime),
+                    widget.formatTime(
+                      isStopCanceled ? scheduledTime : displayTime,
+                    ),
                     style: TextStyle(
                       fontWeight: isUserStart || isUserEnd
                           ? FontWeight.bold
                           : FontWeight.normal,
-                      color: isRealtime && !isPast
-                          ? (displayTime.isAfter(scheduledTime)
-                                ? kDelayed
-                                : kOnTime)
+                      color: isStopCanceled
+                          ? Colors.grey
+                          : isRealtime && !isPast
+                          ? (delayMin > 0 ? kDelayed : kOnTime)
                           : textColor,
+                      decoration: isStopCanceled
+                          ? TextDecoration.lineThrough
+                          : null,
                       fontSize: 13,
                     ),
                   ),
@@ -287,6 +306,15 @@ class _TripRouteSheetState extends ConsumerState<TripRouteSheet> {
                         decoration: isPast ? TextDecoration.lineThrough : null,
                       ),
                     ),
+                    if (isStopCanceled)
+                      const Text(
+                        'Ei pysähdy',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: kDelayed,
+                        ),
+                      ),
                     if (isUserStart)
                       const Text(
                         'Nouset kyytiin tästä',

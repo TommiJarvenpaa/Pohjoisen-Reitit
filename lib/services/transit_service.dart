@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import '../models/app_models.dart';
+import 'realtime_utils.dart';
 
 class TransitService {
   final String digitransitKey;
@@ -112,8 +113,11 @@ class TransitService {
   }
 
   /// Suorittaa GraphQL-kyselyn ja palauttaa vastauksen data-osan.
-  /// Heittää poikkeuksen HTTP-virheestä tai aikakatkaisusta.
-  Future<Map<String, dynamic>?> _runGraphQl(String query) async {
+  /// Heittää poikkeuksen HTTP-virheestä, aikakatkaisusta tai jos vastauksessa
+  /// ei ole dataa lainkaan. GraphQL palauttaa virheet HTTP 200:lla, joten ne
+  /// kirjataan lokiin myös silloin, kun osa datasta tuli perille (esim. yksi
+  /// aliasoitu vuoro puuttuu).
+  Future<Map<String, dynamic>> _runGraphQl(String query) async {
     final response = await _client
         .post(
           _routingUrl,
@@ -127,9 +131,31 @@ class TransitService {
     if (response.statusCode != 200) {
       throw Exception('API Error: ${response.statusCode}');
     }
-    final decoded = json.decode(response.body);
-    return decoded['data'] as Map<String, dynamic>?;
+    final decoded = json.decode(response.body) as Map<String, dynamic>;
+
+    final errors = decoded['errors'];
+    final String errorText = errors is List && errors.isNotEmpty
+        ? errors.map((e) => e is Map ? e['message'] : e).join('; ')
+        : '';
+    if (errorText.isNotEmpty) {
+      debugPrint('GraphQL errors: $errorText');
+    }
+
+    final data = decoded['data'] as Map<String, dynamic>?;
+    if (data == null) {
+      throw Exception(
+        'GraphQL error: ${errorText.isEmpty ? 'no data' : errorText}',
+      );
+    }
+    return data;
   }
+
+  /// stoptimesForDate-kentän argumentti. Ilman päivää OTP käyttää kuluvaa
+  /// liikennöintipäivää. Muoto tarkistetaan, koska arvo upotetaan kyselyyn.
+  static String _serviceDateArg(String serviceDate) =>
+      RegExp(r'^\d{8}$').hasMatch(serviceDate)
+      ? '(serviceDate: "$serviceDate")'
+      : '';
 
   Future<List<Map<String, dynamic>>> fetchNearbyStops(
     double s,
@@ -147,7 +173,7 @@ class TransitService {
     """;
     try {
       final data = await _runGraphQl(query);
-      final stops = data?['stopsByBbox'] as List<dynamic>?;
+      final stops = data['stopsByBbox'] as List<dynamic>?;
       if (stops != null) {
         return stops.map((st) => Map<String, dynamic>.from(st)).toList();
       }
@@ -157,17 +183,20 @@ class TransitService {
     return [];
   }
 
+  /// Vuoron kaikki pysäkit ajoineen. Trip.stoptimes palauttaisi pelkän
+  /// aikataulun ilman päivää (serviceDay -1), joten käytetään
+  /// stoptimesForDate-kenttää, joka sisältää myös reaaliaikatiedon.
   Future<List<Map<String, dynamic>>?> fetchTripRoute(
-    String tripId,
-    String gtfsId,
-  ) async {
+    String tripId, {
+    String serviceDate = '',
+  }) async {
     if (tripId.isEmpty) return null;
 
     final String query =
         """
     {
       trip(id: "$tripId") {
-        stoptimes {
+        stoptimesForDate${_serviceDateArg(serviceDate)} {
           stop {
             name
             gtfsId
@@ -186,10 +215,10 @@ class TransitService {
 
     try {
       final data = await _runGraphQl(query);
-      final tripData = data?['trip'];
+      final tripData = data['trip'];
 
-      if (tripData != null && tripData['stoptimes'] != null) {
-        final stoptimes = tripData['stoptimes'] as List<dynamic>;
+      if (tripData != null && tripData['stoptimesForDate'] != null) {
+        final stoptimes = tripData['stoptimesForDate'] as List<dynamic>;
         return stoptimes.map((st) => Map<String, dynamic>.from(st)).toList();
       }
     } catch (e) {
@@ -198,7 +227,9 @@ class TransitService {
     return null;
   }
 
-  /// Pysäkin seuraavat lähdöt aikataulunäyttöä varten.
+  /// Pysäkin seuraavat lähdöt aikataulunäyttöä varten. Perutut lähdöt ovat
+  /// mukana (omitCanceled: false), jotta ne voidaan näyttää perutuiksi
+  /// sen sijaan, että ne vain katoaisivat listalta.
   /// Heittää poikkeuksen virhetilanteessa, jotta UI voi näyttää virheen
   /// ja tarjota uudelleenyrityksen.
   Future<List<StopTimeData>> fetchStopDepartures(String stopId) async {
@@ -208,7 +239,7 @@ class TransitService {
         """
     {
       stop(id: "$stopId") {
-        stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 20) {
+        stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 20, omitCanceled: false) {
           scheduledDeparture realtimeDeparture realtimeState realtime serviceDay headsign
           trip { gtfsId route { shortName gtfsId } }
         }
@@ -218,7 +249,7 @@ class TransitService {
 
     final data = await _runGraphQl(query);
     final stoptimes =
-        data?['stop']?['stoptimesWithoutPatterns'] as List<dynamic>?;
+        data['stop']?['stoptimesWithoutPatterns'] as List<dynamic>?;
     if (stoptimes == null) return [];
     return stoptimes
         .map((st) => _parseStopTime(st as Map<String, dynamic>))
@@ -226,7 +257,11 @@ class TransitService {
         .toList();
   }
 
-  /// Hakee vuorojen pysäkkikohtaiset reaaliaikatiedot reititys-API:sta.
+  static const int _maxRealtimeTrips = 30;
+
+  /// Hakee vaiheiden vuorojen pysäkkikohtaiset reaaliaikatiedot
+  /// reititys-API:sta. [legs] annetaan tärkeysjärjestyksessä: jos vuoroja
+  /// on enemmän kuin kyselyyn mahtuu, alkupään vuorot säilyvät.
   ///
   /// Digitransitin ohjeen mukaan trip updatet on integroitu reititys-API:in,
   /// joten viiveet haetaan sieltä trip-gtfsId:llä – id:t ovat samasta
@@ -234,60 +269,86 @@ class TransitService {
   /// tarvita epävarmaa trip-id-täsmäystä. (Waltti-feediä käytetään enää
   /// bussien sijainteihin, joita reititys-API ei tarjoa.)
   ///
+  /// Kenttä on stoptimesForDate eikä stoptimes: jälkimmäinen palauttaa
+  /// OTP2:ssa pelkän aikataulun (realtime aina false, serviceDay -1), jolloin
+  /// yksikään viive ei koskaan päivittyisi.
+  ///
   /// Palauttaa null virhetilanteessa, jolloin kutsuja voi pitää vanhan
   /// datan ja merkitä sen vanhentuneeksi.
   Future<Map<String, TripRealtime>?> fetchTripRealtime(
-    List<String> tripIds,
+    List<BusLeg> legs,
   ) async {
-    final ids = tripIds.where((id) => id.isNotEmpty).take(30).toList();
-    if (ids.isEmpty) return {};
+    // trip-gtfsId → liikennöintipäivä, lisäysjärjestys = tärkeysjärjestys.
+    final Map<String, String> serviceDateByTrip = {};
+    for (final leg in legs) {
+      if (leg.tripId.isEmpty || serviceDateByTrip.containsKey(leg.tripId)) {
+        continue;
+      }
+      serviceDateByTrip[leg.tripId] = leg.serviceDate;
+      if (serviceDateByTrip.length == _maxRealtimeTrips) break;
+    }
+    if (serviceDateByTrip.isEmpty) return {};
 
     String tripQueries = '';
-    for (int i = 0; i < ids.length; i++) {
+    int i = 0;
+    serviceDateByTrip.forEach((tripId, serviceDate) {
       tripQueries +=
           """
-        trip$i: trip(id: "${ids[i]}") {
+        trip$i: trip(id: "$tripId") {
           gtfsId
-          stoptimes {
+          stoptimesForDate${_serviceDateArg(serviceDate)} {
             stop { gtfsId }
+            scheduledArrival scheduledDeparture
             realtimeArrival realtimeDeparture realtime realtimeState serviceDay
           }
         }
       """;
-    }
+      i++;
+    });
 
     try {
       final data = await _runGraphQl('{ $tripQueries }');
-      if (data == null) return null;
 
       final Map<String, TripRealtime> result = {};
       data.forEach((alias, tripData) {
         if (tripData == null || tripData['gtfsId'] == null) return;
-        final stoptimes = tripData['stoptimes'] as List<dynamic>?;
+        final stoptimes = tripData['stoptimesForDate'] as List<dynamic>?;
         if (stoptimes == null) return;
 
-        final Map<String, StopRealtime> byStopId = {};
+        // Kaikki käynnit talteen: rengasreitti voi käydä samalla pysäkillä
+        // kahdesti, ja oikea käynti valitaan aikataulun perusteella.
+        final Map<String, List<StopRealtime>> visitsByStopId = {};
         for (final st in stoptimes) {
           // Vain oikea reaaliaikatieto kelpaa – muuten aikataulun aika
           // näkyisi käyttäjälle "live-tietona".
           if (st['realtime'] != true) continue;
           final String? stopId = st['stop']?['gtfsId'];
           final int? serviceDay = st['serviceDay'];
-          if (stopId == null || serviceDay == null) continue;
+          if (stopId == null || serviceDay == null || serviceDay <= 0) {
+            continue;
+          }
 
           DateTime? toTime(int? secs) => secs == null
               ? null
               : DateTime.fromMillisecondsSinceEpoch((serviceDay + secs) * 1000);
 
-          byStopId[stopId] = StopRealtime(
-            arrival: toTime(st['realtimeArrival'] as int?),
-            departure: toTime(st['realtimeDeparture'] as int?),
-            realtimeState: st['realtimeState'] ?? 'UPDATED',
-          );
+          visitsByStopId
+              .putIfAbsent(stopId, () => [])
+              .add(
+                StopRealtime(
+                  arrival: toTime(st['realtimeArrival'] as int?),
+                  departure: toTime(st['realtimeDeparture'] as int?),
+                  realtimeState: st['realtimeState'] ?? 'UPDATED',
+                  scheduled: toTime(
+                    (st['scheduledDeparture'] ?? st['scheduledArrival'])
+                        as int?,
+                  ),
+                ),
+              );
         }
-        if (byStopId.isNotEmpty) {
-          result[tripData['gtfsId'] as String] = TripRealtime(
-            byStopId: byStopId,
+        if (visitsByStopId.isNotEmpty) {
+          result[tripData['gtfsId'] as String] = TripRealtime.fromVisits(
+            visitsByStopId,
           );
         }
       });
@@ -315,6 +376,8 @@ class TransitService {
       headsign: st['headsign'],
       tripId: st['trip']?['gtfsId'] ?? '',
       routeGtfsId: st['trip']?['route']?['gtfsId'] ?? '',
+      patternCode: st['trip']?['pattern']?['code'] ?? '',
+      serviceDayEpochSec: serviceDay,
     );
   }
 
@@ -341,7 +404,13 @@ class TransitService {
       ),
     );
 
-    final itineraries = data?['plan']?['itineraries'] as List<dynamic>?;
+    final plan = data['plan'];
+    if (plan == null) {
+      // Ilman plan-osaa kysely epäonnistui (virheet on jo kirjattu) – ei
+      // tulkita sitä "ei reittejä" -tilanteeksi.
+      throw Exception('Route plan missing from response');
+    }
+    final itineraries = plan['itineraries'] as List<dynamic>?;
     if (itineraries == null || itineraries.isEmpty) {
       if (!isFallback) {
         // Ei reittejä lähitunneilta – etsitään seuraava lähtö vuorokauden
@@ -381,7 +450,11 @@ class TransitService {
 
     parsedOptions = await _expandWithTimetables(parsedOptions, departureTime);
 
-    parsedOptions.sort((a, b) => a.leaveHomeTime.compareTo(b.leaveHomeTime));
+    // Järjestys samalla lähtöajalla kuin kortissa näytetään (viive mukana).
+    parsedOptions.sort(
+      (a, b) =>
+          displayedLeaveTime(a, null).compareTo(displayedLeaveTime(b, null)),
+    );
     return parsedOptions;
   }
 
@@ -414,9 +487,11 @@ class TransitService {
           startTime endTime
           legs {
             mode startTime endTime distance
+            departureDelay arrivalDelay realTime realtimeState serviceDate
             interlineWithPreviousLeg
-            trip { gtfsId }
-            route { shortName gtfsId alerts { alertHeaderText } }
+            trip { gtfsId pattern { code } }
+            route { shortName gtfsId alerts { alertHeaderText effectiveStartDate effectiveEndDate } }
+            alerts { alertHeaderText effectiveStartDate effectiveEndDate trip { gtfsId } }
             from { name lat lon stop { gtfsId } }
             to { name lat lon stop { gtfsId } }
             legGeometry { points }
@@ -428,28 +503,47 @@ class TransitService {
     """;
   }
 
+  /// OTP:n viivekenttä sekunteina (puuttuu tai null = ei viivettä).
+  static int _delaySec(dynamic value) => (value as num?)?.toInt() ?? 0;
+
+  static DateTime? _epochSecToDate(dynamic value) =>
+      value is num && value > 0
+      ? DateTime.fromMillisecondsSinceEpoch(value.toInt() * 1000)
+      : null;
+
+  /// OTP:n startTime/endTime sisältävät reaaliaikatiedon
+  /// (aikataulu = startTime - departureDelay). Sovelluksen RouteOption- ja
+  /// BusLeg-ajat pidetään aikataulun mukaisina ja viive lisätään näyttöön
+  /// vain kerran, joten viiveet vähennetään tässä pois.
   RouteOption _parseItinerary(Map<String, dynamic> itinerary) {
-    final DateTime leaveHome = DateTime.fromMillisecondsSinceEpoch(
-      itinerary['startTime'],
-    );
-    final DateTime arrival = DateTime.fromMillisecondsSinceEpoch(
-      itinerary['endTime'],
-    );
     final List<RouteSegment> segments = [];
     final List<BusLeg> busLegs = [];
     final List<double> walkDistances = [];
+    final List<Duration> walkDurations = [];
 
     double currentWalk = 0.0;
+    Duration currentWalkDuration = Duration.zero;
+    int? firstDepartureDelaySec;
+    int lastArrivalDelaySec = 0;
 
     for (var leg in itinerary['legs']) {
       if (leg['mode'] == 'WALK') {
         currentWalk += (leg['distance'] as num).toDouble();
+        currentWalkDuration += Duration(
+          milliseconds:
+              (leg['endTime'] as num).toInt() -
+              (leg['startTime'] as num).toInt(),
+        );
       }
 
       if (leg['mode'] == 'BUS') {
         walkDistances.add(currentWalk);
+        walkDurations.add(currentWalkDuration);
         currentWalk = 0.0;
+        currentWalkDuration = Duration.zero;
         busLegs.add(_parseBusLeg(leg));
+        firstDepartureDelaySec ??= _delaySec(leg['departureDelay']);
+        lastArrivalDelaySec = _delaySec(leg['arrivalDelay']);
       }
 
       if (leg['legGeometry']?['points'] != null) {
@@ -468,6 +562,14 @@ class TransitService {
     }
 
     walkDistances.add(currentWalk);
+    walkDurations.add(currentWalkDuration);
+
+    final DateTime leaveHome = DateTime.fromMillisecondsSinceEpoch(
+      itinerary['startTime'],
+    ).subtract(Duration(seconds: firstDepartureDelaySec ?? 0));
+    final DateTime arrival = DateTime.fromMillisecondsSinceEpoch(
+      itinerary['endTime'],
+    ).subtract(Duration(seconds: lastArrivalDelaySec));
 
     return RouteOption(
       leaveHomeTime: leaveHome,
@@ -475,6 +577,7 @@ class TransitService {
       busLegs: busLegs,
       segments: segments,
       walkDistances: walkDistances,
+      walkDurations: walkDurations,
     );
   }
 
@@ -482,9 +585,20 @@ class TransitService {
     final String fromStopId = leg['from']?['stop']?['gtfsId'] ?? '';
     final String toStopId = leg['to']?['stop']?['gtfsId'] ?? '';
     final String tripId = leg['trip']?['gtfsId'] ?? '';
-    final DateTime scheduledDep = DateTime.fromMillisecondsSinceEpoch(
+    // startTime/endTime sisältävät reaaliaikatiedon, ks. _parseItinerary.
+    final DateTime realtimeDep = DateTime.fromMillisecondsSinceEpoch(
       leg['startTime'],
     );
+    final DateTime realtimeArr = DateTime.fromMillisecondsSinceEpoch(
+      leg['endTime'],
+    );
+    final DateTime scheduledDep = realtimeDep.subtract(
+      Duration(seconds: _delaySec(leg['departureDelay'])),
+    );
+    final DateTime scheduledArr = realtimeArr.subtract(
+      Duration(seconds: _delaySec(leg['arrivalDelay'])),
+    );
+    final bool isRealtime = leg['realTime'] == true;
     final double? fromLat = (leg['from']?['lat'] as num?)?.toDouble();
     final double? fromLon = (leg['from']?['lon'] as num?)?.toDouble();
     final double? toLat = (leg['to']?['lat'] as num?)?.toDouble();
@@ -519,17 +633,33 @@ class TransitService {
       legStopIds.add(toStopId);
     }
 
+    // Vaiheen tiedotteet kattavat linjan lisäksi vuoron, pysäkit ja
+    // liikennöitsijän (esim. yksittäisen vuoron poikkeusreitti). Linjan
+    // kaikki tiedotteet otetaan mukaan voimassaoloajasta riippumatta, jotta
+    // aikataulusta kopioitu myöhempi lähtö saa omaan aikaansa osuvat
+    // tiedotteet – voimassaolo tarkistetaan näytettäessä (activeLegAlerts).
     final List<AlertInfo> alerts = [];
-    final rawAlerts = leg['route']?['alerts'] as List<dynamic>?;
-
-    if (rawAlerts != null) {
-      for (var a in rawAlerts) {
-        final text = a['alertHeaderText'];
-        if (text != null && text.toString().isNotEmpty) {
-          alerts.add(AlertInfo(text: text.toString()));
+    final Set<String> seenAlerts = {};
+    void addAlerts(List<dynamic>? rawAlerts) {
+      for (final a in rawAlerts ?? const []) {
+        final String text = a['alertHeaderText']?.toString() ?? '';
+        if (text.isEmpty) continue;
+        final alert = AlertInfo(
+          text: text,
+          effectiveStart: _epochSecToDate(a['effectiveStartDate']),
+          effectiveEnd: _epochSecToDate(a['effectiveEndDate']),
+          tripId: a['trip']?['gtfsId'] ?? '',
+        );
+        if (seenAlerts.add(
+          '$text|${alert.effectiveStart}|${alert.effectiveEnd}|${alert.tripId}',
+        )) {
+          alerts.add(alert);
         }
       }
     }
+
+    addAlerts(leg['alerts'] as List<dynamic>?);
+    addAlerts(leg['route']?['alerts'] as List<dynamic>?);
 
     return BusLeg(
       busNumber: leg['route']['shortName'] ?? 'Bussi',
@@ -545,18 +675,40 @@ class TransitService {
       toLat: toLat,
       toLon: toLon,
       departureTime: scheduledDep,
-      arrivalTime: DateTime.fromMillisecondsSinceEpoch(leg['endTime']),
-      realtimeDeparture: scheduledDep,
-      realtimeState: 'SCHEDULED',
-      isRealtime: false,
+      arrivalTime: scheduledArr,
+      realtimeDeparture: realtimeDep,
+      // Saapumisviive voi poiketa lähdön viiveestä (viive kasvaa tai
+      // kutistuu matkalla), joten OTP:n ennuste säilytetään erikseen.
+      realtimeArrival: isRealtime ? realtimeArr : null,
+      realtimeState:
+          leg['realtimeState'] ?? (isRealtime ? 'UPDATED' : 'SCHEDULED'),
+      isRealtime: isRealtime,
       stayOnBus: stayOnBus,
       intermediateStops: intermediateStops,
       alerts: alerts,
+      // Digitransit palauttaa päivän muodossa 2026-10-06, vaikka
+      // dokumentaatio sanoo YYYYMMDD – yhtenäistetään YYYYMMDD-muotoon.
+      serviceDate: (leg['serviceDate'] as String? ?? '').replaceAll('-', ''),
+      patternCode: leg['trip']?['pattern']?['code'] ?? '',
     );
   }
 
+  /// Aikataulun ryhmittelyavain: nousupysäkki + vuoron pysäkkijärjestys.
+  /// Pelkkä linjatunnus ei riitä, koska saman linjan vuorot voivat kulkea
+  /// eri reittiä tai päättyä aiemmin. Linjatunnus on varalla, jos OTP ei
+  /// palauta pattern-koodia.
+  static String _timetableKey(
+    String stopId,
+    String patternCode,
+    String busNumber,
+  ) => patternCode.isNotEmpty ? '${stopId}_$patternCode' : '${stopId}_$busNumber';
+
+  static String _departureKey(String timetableKey, DateTime scheduledDep) =>
+      '$timetableKey@${scheduledDep.millisecondsSinceEpoch}';
+
   /// Laajentaa reittivaihtoehdot ensimmäisen nousupysäkin aikataululla:
-  /// samasta reittiketjusta luodaan vaihtoehto jokaiselle lähtövuorolle.
+  /// samasta reittiketjusta luodaan vaihtoehto jokaiselle saman
+  /// pysäkkijärjestyksen lähtövuorolle, jota OTP ei itse ehdottanut.
   /// Virhetilanteessa palautetaan alkuperäiset vaihtoehdot sellaisenaan.
   Future<List<RouteOption>> _expandWithTimetables(
     List<RouteOption> parsedOptions,
@@ -579,9 +731,9 @@ class TransitService {
           """
         stop$i: stop(id: "$stopId") {
           gtfsId
-          stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 30) {
+          stoptimesWithoutPatterns(startTime: $startTimeSec, timeRange: 7200, numberOfDepartures: 30, omitNonPickups: true) {
             scheduledDeparture realtimeDeparture realtimeState realtime serviceDay
-            trip { gtfsId route { shortName } }
+            trip { gtfsId pattern { code } route { shortName } }
           }
         }
       """;
@@ -590,7 +742,6 @@ class TransitService {
 
     try {
       final ttDataMap = await _runGraphQl('{ $stopQueries }');
-      if (ttDataMap == null) return parsedOptions;
 
       final Map<String, List<StopTimeData>> timetableMap = {};
 
@@ -605,7 +756,10 @@ class TransitService {
           final parsed = _parseStopTime(st as Map<String, dynamic>);
           if (parsed == null) continue;
           timetableMap
-              .putIfAbsent('${sId}_${parsed.busNumber}', () => [])
+              .putIfAbsent(
+                _timetableKey(sId, parsed.patternCode, parsed.busNumber ?? ''),
+                () => [],
+              )
               .add(parsed);
         }
       });
@@ -613,7 +767,11 @@ class TransitService {
       final List<RouteOption> expandedOptions = [];
       final Set<String> addedSignatures = {};
 
-      for (var opt in parsedOptions) {
+      // OTP:n omat ehdotukset ensin: niissä vaihtoyhteydet, trip-id:t ja
+      // ajat ovat oikeat. Kloonit vain täydentävät lähtöjä, joita OTP ei
+      // ehdottanut – muuten kopio voisi korvata OTP:n tarkan ehdotuksen.
+      final Set<String> coveredDepartures = {};
+      for (final opt in parsedOptions) {
         if (opt.busLegs.isEmpty) {
           final String sig =
               'walk_only_${(opt.arrivalTime.millisecondsSinceEpoch / 600000).round()}';
@@ -622,73 +780,100 @@ class TransitService {
           }
           continue;
         }
-
-        final firstLeg = opt.busLegs.first;
-        final String key = '${firstLeg.fromStopId}_${firstLeg.busNumber}';
-        final departures = timetableMap[key];
-
-        if (departures == null) {
-          if (addedSignatures.add(_optionSignature(opt.busLegs))) {
-            expandedOptions.add(opt);
-          }
-          continue;
+        if (addedSignatures.add(_optionSignature(opt.busLegs))) {
+          expandedOptions.add(opt);
         }
+        final first = opt.busLegs.first;
+        if (first.tripId.isNotEmpty) coveredDepartures.add(first.tripId);
+        coveredDepartures.add(
+          _departureKey(
+            _timetableKey(first.fromStopId, first.patternCode, first.busNumber),
+            first.departureTime,
+          ),
+        );
+      }
 
-        for (var stData in departures) {
+      // Kopiopohjiksi kelpaavat vain yhden bussin reitit: vaihdollisen reitin
+      // jatkobussi kulkisi kopiossa keksittyyn aikaan, joten vaihtoreittien
+      // vaihtoehdot tulevat vain OTP:ltä. Samalle pysäkille ja vuoron
+      // pysäkkijärjestykselle valitaan nopein pohja, ettei samasta lähdöstä
+      // synny useaa korttia (esim. eri poistumispysäkki).
+      final Map<String, RouteOption> templates = {};
+      for (final opt in parsedOptions) {
+        if (opt.busLegs.length != 1) continue;
+        final leg = opt.busLegs.single;
+        final String key = _timetableKey(
+          leg.fromStopId,
+          leg.patternCode,
+          leg.busNumber,
+        );
+        final RouteOption? current = templates[key];
+        if (current == null ||
+            _doorToDoor(opt).compareTo(_doorToDoor(current)) < 0) {
+          templates[key] = opt;
+        }
+      }
+
+      templates.forEach((key, opt) {
+        final departures = timetableMap[key];
+        if (departures == null) return;
+        final BusLeg templateLeg = opt.busLegs.single;
+
+        for (final stData in departures) {
           final DateTime newScheduledDep = DateTime.fromMillisecondsSinceEpoch(
             stData.scheduledEpochSec * 1000,
           );
+          if ((stData.tripId.isNotEmpty &&
+                  coveredDepartures.contains(stData.tripId)) ||
+              coveredDepartures.contains(_departureKey(key, newScheduledDep))) {
+            continue;
+          }
           final Duration offset = newScheduledDep.difference(
-            firstLeg.departureTime,
+            templateLeg.departureTime,
+          );
+          final DateTime realtimeDep = DateTime.fromMillisecondsSinceEpoch(
+            stData.realtimeEpochSec * 1000,
           );
 
-          // Onko tämä lähtö sama fyysinen vuoro kuin alkuperäisessä
-          // reittiehdotuksessa? Vain silloin jatkovaiheiden trip-id:t
-          // pitävät paikkansa – muille lähdöille ne kuvaisivat väärää
-          // vuoroa. Molemmat id:t ovat saman OTP-instanssin gtfsId:itä,
-          // joten suora vertailu riittää.
-          final bool isOriginalDeparture =
-              stData.tripId.isNotEmpty && stData.tripId == firstLeg.tripId;
+          // Lähtöön ei ehdi, jos kävely pysäkille pitäisi aloittaa ennen
+          // hakuaikaa (bussin viive huomioiden).
+          final DateTime leave = opt.leaveHomeTime
+              .add(offset)
+              .add(realtimeDep.difference(newScheduledDep));
+          if (leave.isBefore(departureTime)) continue;
 
-          final List<BusLeg> clonedLegs = [];
-          for (int k = 0; k < opt.busLegs.length; k++) {
-            final baseLeg = opt.busLegs[k];
-            final bool isFirst = k == 0;
-            clonedLegs.add(
-              baseLeg.copyWith(
-                tripId: isFirst
-                    ? (stData.tripId.isNotEmpty
-                          ? stData.tripId
-                          : baseLeg.tripId)
-                    : (isOriginalDeparture ? baseLeg.tripId : ''),
-                departureTime: baseLeg.departureTime.add(offset),
-                arrivalTime: baseLeg.arrivalTime.add(offset),
-                realtimeDeparture: isFirst
-                    ? DateTime.fromMillisecondsSinceEpoch(
-                        stData.realtimeEpochSec * 1000,
-                      )
-                    : baseLeg.departureTime.add(offset),
-                realtimeState: isFirst ? stData.realtimeState : 'SCHEDULED',
-                isRealtime: isFirst ? stData.isRealtime : false,
-              ),
-            );
-          }
+          final BusLeg clonedLeg = templateLeg.copyWith(
+            tripId: stData.tripId,
+            serviceDate: stData.serviceDate,
+            departureTime: newScheduledDep,
+            arrivalTime: templateLeg.arrivalTime.add(offset),
+            realtimeDeparture: realtimeDep,
+            // Pysäkkiaikataulusta tiedetään vain lähdön viive.
+            clearRealtimeArrival: true,
+            realtimeState: stData.realtimeState,
+            isRealtime: stData.isRealtime,
+            // Pohjavuoron omat tiedotteet eivät koske toista vuoroa.
+            alerts: templateLeg.alerts
+                .where((a) => a.tripId.isEmpty || a.tripId == stData.tripId)
+                .toList(),
+          );
 
-          if (addedSignatures.add(_optionSignature(clonedLegs))) {
+          if (addedSignatures.add(_optionSignature([clonedLeg]))) {
             expandedOptions.add(
               RouteOption(
                 leaveHomeTime: opt.leaveHomeTime.add(offset),
                 // Pidetään aikataulun mukaisena: viive lasketaan näyttöön
                 // vain kerran (realArrivalTime), eikä se kertaudu tähän.
                 arrivalTime: opt.arrivalTime.add(offset),
-                busLegs: clonedLegs,
+                busLegs: [clonedLeg],
                 segments: opt.segments,
                 walkDistances: opt.walkDistances,
+                walkDurations: opt.walkDurations,
               ),
             );
           }
         }
-      }
+      });
       return expandedOptions;
     } catch (e) {
       debugPrint('Timetable extension failed: $e');
@@ -696,7 +881,14 @@ class TransitService {
     }
   }
 
+  static Duration _doorToDoor(RouteOption option) =>
+      option.arrivalTime.difference(option.leaveHomeTime);
+
   String _optionSignature(List<BusLeg> legs) => legs
-      .map((l) => '${l.busNumber}_${l.departureTime.millisecondsSinceEpoch}')
+      .map(
+        (l) =>
+            '${l.busNumber}_${l.fromStopId}_${l.toStopId}_'
+            '${l.departureTime.millisecondsSinceEpoch}',
+      )
       .join('|');
 }

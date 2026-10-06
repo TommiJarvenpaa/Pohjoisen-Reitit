@@ -11,9 +11,9 @@ import '../models/app_models.dart';
 /// eksaktia. Raakaa GTFS-RT-feediä (FeedMessage) käytetään enää bussien
 /// sijainteihin, joiden trip-id:t vaativat sumeampaa vertailua.
 
-/// Sama trip-gtfsId tarkoittaa vuoroa, ei päivättyä lähtöä: reititys-API:n
-/// stoptimes koskee kuluvaa liikennöintipäivää, mutta käyttäjän katsoma
-/// vaihe voi olla esim. huomisen sama vuoro. Tuntien kokoluokan poikkeama
+/// Sama trip-gtfsId tarkoittaa vuoroa, ei päivättyä lähtöä. Viiveet haetaan
+/// vaiheen liikennöintipäivälle, mutta päivä voi puuttua (vanha välimuisti,
+/// jolloin OTP käyttää kuluvaa päivää). Tuntien kokoluokan poikkeama
 /// aikataulusta tarkoittaa eri liikennöintipäivän lähtöä – oikean vuoron
 /// viive ei koskaan ole näin suuri.
 const Duration _serviceDayGuard = Duration(hours: 3);
@@ -23,45 +23,181 @@ DateTime? _plausible(DateTime? time, DateTime near) {
   return time.difference(near).abs() <= _serviceDayGuard ? time : null;
 }
 
+/// Pysäkin reaaliaikatieto vaiheen vuorolla. Jos vuoro käy pysäkillä
+/// useasti (rengasreitti), valitaan käynti, jonka aikataulu on lähimpänä
+/// [near]:ia – muuten paluukäynnin aika näkyisi lähdön "viiveenä".
 StopRealtime? _stopRealtime(
   Map<String, TripRealtime>? tripRealtime,
   BusLeg leg,
   String stopId,
+  DateTime near,
 ) {
   if (tripRealtime == null || leg.tripId.isEmpty || stopId.isEmpty) {
     return null;
   }
-  return tripRealtime[leg.tripId]?.byStopId[stopId];
+  return tripRealtime[leg.tripId]?.visitNear(stopId, near);
 }
+
+bool _isCanceled(StopRealtime? rt) => rt?.realtimeState == 'CANCELED';
 
 /// Pysäkin reaaliaikainen lähtöaika (tai saapuminen, jos lähtöä ei ole).
 /// [near] = pysäkin aikataulun mukainen aika, oletuksena vaiheen lähtöaika.
+///
+/// Perutulle pysäkille palautuu null: OTP antaa perutun pysäkin ajaksi
+/// aikataulun ajan, joka näyttäisi muuten "ajallaan"-tiedolta.
 DateTime? getRealtimeStopTime(
   Map<String, TripRealtime>? tripRealtime,
   BusLeg leg,
   String stopId, {
   DateTime? near,
 }) {
-  final rt = _stopRealtime(tripRealtime, leg, stopId);
-  if (rt == null) return null;
   final DateTime reference = near ?? leg.departureTime;
+  final rt = _stopRealtime(tripRealtime, leg, stopId, reference);
+  if (rt == null || _isCanceled(rt)) return null;
   return _plausible(rt.departure, reference) ??
       _plausible(rt.arrival, reference);
 }
 
 /// Pysäkin reaaliaikainen saapumisaika (tai lähtö, jos saapumista ei ole).
 /// [near] = pysäkin aikataulun mukainen aika, oletuksena vaiheen saapumisaika.
+/// Perutulle pysäkille null, ks. [getRealtimeStopTime].
 DateTime? getRealtimeArrivalTime(
   Map<String, TripRealtime>? tripRealtime,
   BusLeg leg,
   String stopId, {
   DateTime? near,
 }) {
-  final rt = _stopRealtime(tripRealtime, leg, stopId);
-  if (rt == null) return null;
   final DateTime reference = near ?? leg.arrivalTime;
+  final rt = _stopRealtime(tripRealtime, leg, stopId, reference);
+  if (rt == null || _isCanceled(rt)) return null;
   return _plausible(rt.arrival, reference) ??
       _plausible(rt.departure, reference);
+}
+
+/// Ohittaako vuoro pysäkin live-tiedon mukaan (peruttu vuoro tai pysäkki,
+/// esim. poikkeusreitti). [near] = pysäkin aikataulun mukainen aika.
+bool isStopCanceled(
+  Map<String, TripRealtime>? tripRealtime,
+  BusLeg leg,
+  String stopId, {
+  DateTime? near,
+}) => _isCanceled(
+  _stopRealtime(tripRealtime, leg, stopId, near ?? leg.departureTime),
+);
+
+/// Vaiheen peruutustila käyttäjän kannalta.
+enum LegCancellation {
+  none,
+
+  /// Vuoro on peruttu (tai bussi ei pysähdy nousu- eikä poistumispysäkillä).
+  canceled,
+
+  /// Bussi ei pysähdy nousupysäkillä.
+  boardingSkipped,
+
+  /// Bussi ei pysähdy poistumispysäkillä.
+  alightingSkipped,
+}
+
+/// Vaiheen peruutustila hakuhetken tilasta ja live-seurannan
+/// pysäkkikohtaisista tiloista. Sama päättely kortissa ja jakotekstissä.
+LegCancellation legCancellation(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  if (leg.realtimeState == 'CANCELED') return LegCancellation.canceled;
+  final bool boarding = isStopCanceled(tripRealtime, leg, leg.fromStopId);
+  final bool alighting = isStopCanceled(
+    tripRealtime,
+    leg,
+    leg.toStopId,
+    near: leg.arrivalTime,
+  );
+  if (boarding && alighting) return LegCancellation.canceled;
+  if (boarding) return LegCancellation.boardingSkipped;
+  if (alighting) return LegCancellation.alightingSkipped;
+  return LegCancellation.none;
+}
+
+/// Vaiheen reaaliaikainen lähtöaika: live-seurannan tarkka aika, muuten
+/// hakuhetken tilannekuva. Null = reaaliaikatietoa ei ole.
+DateTime? realtimeLegDeparture(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  final exact = getRealtimeStopTime(tripRealtime, leg, leg.fromStopId);
+  if (exact != null) return exact;
+  return leg.isRealtime ? leg.realtimeDeparture : null;
+}
+
+/// Vaiheen saapumisaika näyttöön, tarkimmasta lähteestä alkaen:
+/// live-seurannan saapuminen, live-lähdön viiveellä siirretty aikataulu,
+/// hakuhetken ennuste (OTP:n saapumisviive voi poiketa lähdön viiveestä) ja
+/// lopuksi aikataulu.
+DateTime displayedLegArrival(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  final exact = getRealtimeArrivalTime(tripRealtime, leg, leg.toStopId);
+  if (exact != null) return exact;
+
+  final exactDep = getRealtimeStopTime(tripRealtime, leg, leg.fromStopId);
+  if (exactDep != null) {
+    return leg.arrivalTime.add(exactDep.difference(leg.departureTime));
+  }
+  if (!leg.isRealtime) return leg.arrivalTime;
+  return leg.realtimeArrival ??
+      leg.arrivalTime.add(leg.realtimeDeparture.difference(leg.departureTime));
+}
+
+/// Milloin kotoa pitää lähteä: aikataulun mukainen lähtöaika siirrettynä
+/// ensimmäisen bussin viiveellä, kuten OTP:n omissa reittiehdotuksissa.
+/// Etuajassa kulkeva bussi aikaistaa lähtöä, myöhässä oleva myöhentää.
+DateTime displayedLeaveTime(
+  RouteOption option,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  if (option.busLegs.isEmpty) return option.leaveHomeTime;
+  final BusLeg first = option.busLegs.first;
+  final DateTime? realtimeDep = realtimeLegDeparture(first, tripRealtime);
+  if (realtimeDep == null) return option.leaveHomeTime;
+  return option.leaveHomeTime.add(realtimeDep.difference(first.departureTime));
+}
+
+/// Vaiheen aikana voimassa olevat tiedotteet, sama teksti kerran.
+/// Voimassaolo tarkistetaan vasta näytettäessä, jotta aikataulusta
+/// kopioitu lähtö saa omaan aikaansa osuvat tiedotteet.
+List<AlertInfo> activeLegAlerts(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+) {
+  final DateTime start =
+      realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
+  final DateTime end = displayedLegArrival(leg, tripRealtime);
+  final DateTime from = start.isBefore(leg.departureTime)
+      ? start
+      : leg.departureTime;
+  final DateTime to = end.isAfter(leg.arrivalTime) ? end : leg.arrivalTime;
+
+  final Set<String> seenTexts = {};
+  return [
+    for (final alert in leg.alerts)
+      if (alert.isActiveBetween(from, to) && seenTexts.add(alert.text)) alert,
+  ];
+}
+
+/// Kellonaikojen ero minuutteina sellaisina kuin ne näytetään (HH:mm ilman
+/// sekunteja). Näin "+N min" ja kesto täsmäävät näkyviin aikoihin:
+/// 07:46:40 → 07:54:10 näkyy 07:46 → 07:54 eli +8 min, ei +7.
+int clockMinutesBetween(DateTime from, DateTime to) {
+  DateTime floorToMinute(DateTime t) => t.subtract(
+    Duration(
+      seconds: t.second,
+      milliseconds: t.millisecond,
+      microseconds: t.microsecond,
+    ),
+  );
+  return floorToMinute(to).difference(floorToMinute(from)).inMinutes;
 }
 
 /// Reitin todellinen perilläoloaika: viimeisen bussivaiheen saapuminen
@@ -79,21 +215,7 @@ DateTime realArrivalTime(
   final Duration walkAfterBus = option.arrivalTime.difference(
     lastLeg.arrivalTime,
   );
-
-  DateTime lastLegArrival = lastLeg.arrivalTime.add(
-    lastLeg.isRealtime
-        ? lastLeg.realtimeDeparture.difference(lastLeg.departureTime)
-        : Duration.zero,
-  );
-  final exact = getRealtimeArrivalTime(
-    tripRealtime,
-    lastLeg,
-    lastLeg.toStopId,
-  );
-  if (exact != null) {
-    lastLegArrival = exact;
-  }
-  return lastLegArrival.add(walkAfterBus);
+  return displayedLegArrival(lastLeg, tripRealtime).add(walkAfterBus);
 }
 
 /// Välipysäkin aikataulun näyttöteksti: tarkka aika reaaliaikatiedoista jos
@@ -123,45 +245,35 @@ String intermediateStopTimeLabel(
     }
   }
 
-  final Duration delay = leg.isRealtime
-      ? leg.realtimeDeparture.difference(leg.departureTime)
-      : Duration.zero;
+  // Sama viivelähde kuin vaiheen lähtörivillä, jotta arviot eivät poikkea
+  // otsikossa näkyvästä viiveestä.
+  final DateTime? realtimeDep = realtimeLegDeparture(leg, tripRealtime);
+  final Duration delay = realtimeDep == null
+      ? Duration.zero
+      : realtimeDep.difference(leg.departureTime);
 
   return fmt(scheduledT.add(delay));
 }
 
 /// Montako minuuttia edellinen bussi on myöhässä suhteessa seuraavan
-/// lähtöön vaihtopysäkillä. Positiivinen = vaihto voi jäädä välistä.
+/// lähtöön vaihtopysäkillä, kun pysäkkien välinen kävely [transferWalk]
+/// on otettu huomioon. Positiivinen = vaihto voi jäädä välistä (pienikin
+/// myöhästyminen pyöristyy ylöspäin 1 minuutiksi), nolla tai negatiivinen =
+/// vaihtoon jäävä aika kokonaisina minuutteina miinusmerkkisenä.
 int transferLatenessMinutes(
   BusLeg prevLeg,
   BusLeg nextLeg,
-  Map<String, TripRealtime>? tripRealtime,
-) {
-  DateTime prevArrival = prevLeg.arrivalTime.add(
-    prevLeg.isRealtime
-        ? prevLeg.realtimeDeparture.difference(prevLeg.departureTime)
-        : Duration.zero,
-  );
-  final exactArrival = getRealtimeArrivalTime(
-    tripRealtime,
-    prevLeg,
-    prevLeg.toStopId,
-  );
-  if (exactArrival != null) {
-    prevArrival = exactArrival;
-  }
+  Map<String, TripRealtime>? tripRealtime, {
+  Duration transferWalk = Duration.zero,
+}) {
+  final DateTime prevArrival = displayedLegArrival(prevLeg, tripRealtime);
+  final DateTime nextDeparture =
+      realtimeLegDeparture(nextLeg, tripRealtime) ?? nextLeg.departureTime;
 
-  DateTime nextDeparture = nextLeg.realtimeDeparture;
-  final exactDeparture = getRealtimeStopTime(
-    tripRealtime,
-    nextLeg,
-    nextLeg.fromStopId,
-  );
-  if (exactDeparture != null) {
-    nextDeparture = exactDeparture;
-  }
-
-  return prevArrival.difference(nextDeparture).inMinutes;
+  final int slackSec =
+      nextDeparture.difference(prevArrival).inSeconds - transferWalk.inSeconds;
+  if (slackSec < 0) return (-slackSec / 60).ceil();
+  return -(slackSec ~/ 60);
 }
 
 /// Poistaa namespace-etuliitteen ("waltti:", "HSL:" jne.) ja
