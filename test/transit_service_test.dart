@@ -25,11 +25,17 @@ MockClient planClient({
   return MockClient((request) async {
     final body = request.body;
     if (body.contains('plan(')) {
-      return http.Response(json.encode({'data': plan}), 200,
-          headers: _jsonHeaders);
+      return http.Response(
+        json.encode({'data': plan}),
+        200,
+        headers: _jsonHeaders,
+      );
     }
-    return http.Response(json.encode({'data': timetable}), 200,
-        headers: _jsonHeaders);
+    return http.Response(
+      json.encode({'data': timetable}),
+      200,
+      headers: _jsonHeaders,
+    );
   });
 }
 
@@ -57,7 +63,9 @@ Map<String, dynamic> busLegJson({
   'startTime': departure
       .add(Duration(seconds: departureDelaySec))
       .millisecondsSinceEpoch,
-  'endTime': arrival.add(Duration(seconds: arrivalDelaySec)).millisecondsSinceEpoch,
+  'endTime': arrival
+      .add(Duration(seconds: arrivalDelaySec))
+      .millisecondsSinceEpoch,
   'distance': 8000,
   'departureDelay': departureDelaySec,
   'arrivalDelay': arrivalDelaySec,
@@ -201,16 +209,16 @@ void main() {
         return http.Response('{}', 200);
       });
 
-      final places = await makeService(client).getAutocompleteSuggestions(' K ');
+      final places = await makeService(
+        client,
+      ).getAutocompleteSuggestions(' K ');
 
       expect(places, isEmpty);
       expect(called, isFalse);
     });
 
     test('HTTP-virhe palauttaa tyhjän listan kaatumatta', () async {
-      final client = MockClient(
-        (request) async => http.Response('error', 500),
-      );
+      final client = MockClient((request) async => http.Response('error', 500));
 
       final places = await makeService(
         client,
@@ -311,9 +319,7 @@ void main() {
     });
 
     test('heittää poikkeuksen HTTP-virheestä, jotta UI voi näyttää sen', () {
-      final client = MockClient(
-        (request) async => http.Response('error', 500),
-      );
+      final client = MockClient((request) async => http.Response('error', 500));
 
       expect(
         () => makeService(client).fetchStopDepartures('OULU:201'),
@@ -457,62 +463,64 @@ void main() {
       expect(transferLatenessMinutes(legs[0], legs[1], null), -5);
     });
 
-    test('vaihdollista reittiä ei kopioida keksittyihin vaihtoaikoihin',
-        () async {
-      final leg1Arr = DateTime(2026, 6, 11, 12, 20);
-      final leg2Dep = DateTime(2026, 6, 11, 12, 30);
-      final leg2Arr = DateTime(2026, 6, 11, 12, 50);
-      final plan = planJson([
-        itineraryJson([
-          busLegJson(
-            tripId: 'OULU:111',
-            departure: dep,
-            arrival: leg1Arr,
-            fromStopId: 'OULU:201',
-            toStopId: 'OULU:203',
-          ),
-          busLegJson(
-            tripId: 'OULU:222',
-            departure: leg2Dep,
-            arrival: leg2Arr,
-            fromStopId: 'OULU:204',
-            toStopId: 'OULU:205',
-          ),
-        ]),
-      ]);
-      final timetable = {
-        'stop0': {
-          'gtfsId': 'OULU:201',
-          'stoptimesWithoutPatterns': [
-            // Alkuperäinen lähtö.
-            stoptimeJson(
+    test(
+      'vaihdollista reittiä ei kopioida keksittyihin vaihtoaikoihin',
+      () async {
+        final leg1Arr = DateTime(2026, 6, 11, 12, 20);
+        final leg2Dep = DateTime(2026, 6, 11, 12, 30);
+        final leg2Arr = DateTime(2026, 6, 11, 12, 50);
+        final plan = planJson([
+          itineraryJson([
+            busLegJson(
               tripId: 'OULU:111',
-              scheduledDeparture: noonSecs,
-              serviceDay: serviceDay,
+              departure: dep,
+              arrival: leg1Arr,
+              fromStopId: 'OULU:201',
+              toStopId: 'OULU:203',
             ),
-            // Saman linjan seuraava vuoro 15 min myöhemmin.
-            stoptimeJson(
-              tripId: 'OULU:333',
-              scheduledDeparture: noonSecs + 900,
-              serviceDay: serviceDay,
+            busLegJson(
+              tripId: 'OULU:222',
+              departure: leg2Dep,
+              arrival: leg2Arr,
+              fromStopId: 'OULU:204',
+              toStopId: 'OULU:205',
             ),
-          ],
-        },
-      };
+          ]),
+        ]);
+        final timetable = {
+          'stop0': {
+            'gtfsId': 'OULU:201',
+            'stoptimesWithoutPatterns': [
+              // Alkuperäinen lähtö.
+              stoptimeJson(
+                tripId: 'OULU:111',
+                scheduledDeparture: noonSecs,
+                serviceDay: serviceDay,
+              ),
+              // Saman linjan seuraava vuoro 15 min myöhemmin.
+              stoptimeJson(
+                tripId: 'OULU:333',
+                scheduledDeparture: noonSecs + 900,
+                serviceDay: serviceDay,
+              ),
+            ],
+          },
+        };
 
-      final options = await makeService(
-        planClient(plan: plan, timetable: timetable),
-      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+        final options = await makeService(
+          planClient(plan: plan, timetable: timetable),
+        ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
 
-      // Kopiossa vaihtobussi kulkisi 12:45, jota ei välttämättä ole
-      // olemassa – vaihtoreitin vaihtoehdot tulevat vain OTP:ltä.
-      expect(options, hasLength(1));
-      final original = options.single;
-      // Jatkovaiheen trip-id säilyy, jotta live-tieto löytää vaihtobussin.
-      expect(original.busLegs[0].tripId, 'OULU:111');
-      expect(original.busLegs[1].tripId, 'OULU:222');
-      expect(original.busLegs[1].departureTime, leg2Dep);
-    });
+        // Kopiossa vaihtobussi kulkisi 12:45, jota ei välttämättä ole
+        // olemassa – vaihtoreitin vaihtoehdot tulevat vain OTP:ltä.
+        expect(options, hasLength(1));
+        final original = options.single;
+        // Jatkovaiheen trip-id säilyy, jotta live-tieto löytää vaihtobussin.
+        expect(original.busLegs[0].tripId, 'OULU:111');
+        expect(original.busLegs[1].tripId, 'OULU:222');
+        expect(original.busLegs[1].departureTime, leg2Dep);
+      },
+    );
 
     test('kopioitu lähtö saa oman vuoron, päivän ja lähtöviiveen', () async {
       final arr = DateTime(2026, 6, 11, 12, 30);
@@ -758,48 +766,49 @@ void main() {
       expect(options[2].busLegs.single.toStopId, 'OULU:205');
     });
 
-    test('OTP:n saapumisviive säilyy, vaikka se poikkeaa lähtöviiveestä',
-        () async {
-      final leg1Arr = DateTime(2026, 6, 11, 12, 20);
-      final leg2Dep = DateTime(2026, 6, 11, 12, 24);
-      final plan = planJson([
-        itineraryJson([
-          // Lähtee 6 min myöhässä, kirii saapumiseen mennessä 2 minuuttiin.
-          busLegJson(
-            tripId: 'OULU:111',
-            departure: dep,
-            arrival: leg1Arr,
-            fromStopId: 'OULU:201',
-            toStopId: 'OULU:203',
-            departureDelaySec: 360,
-            arrivalDelaySec: 120,
-            realTime: true,
-          ),
-          busLegJson(
-            tripId: 'OULU:222',
-            departure: leg2Dep,
-            arrival: DateTime(2026, 6, 11, 12, 40),
-            fromStopId: 'OULU:203',
-            toStopId: 'OULU:205',
-          ),
-        ]),
-      ]);
+    test(
+      'OTP:n saapumisviive säilyy, vaikka se poikkeaa lähtöviiveestä',
+      () async {
+        final leg1Arr = DateTime(2026, 6, 11, 12, 20);
+        final leg2Dep = DateTime(2026, 6, 11, 12, 24);
+        final plan = planJson([
+          itineraryJson([
+            // Lähtee 6 min myöhässä, kirii saapumiseen mennessä 2 minuuttiin.
+            busLegJson(
+              tripId: 'OULU:111',
+              departure: dep,
+              arrival: leg1Arr,
+              fromStopId: 'OULU:201',
+              toStopId: 'OULU:203',
+              departureDelaySec: 360,
+              arrivalDelaySec: 120,
+              realTime: true,
+            ),
+            busLegJson(
+              tripId: 'OULU:222',
+              departure: leg2Dep,
+              arrival: DateTime(2026, 6, 11, 12, 40),
+              fromStopId: 'OULU:203',
+              toStopId: 'OULU:205',
+            ),
+          ]),
+        ]);
 
-      final options = await makeService(
-        planClient(plan: plan, timetable: {}),
-      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+        final options = await makeService(
+          planClient(plan: plan, timetable: {}),
+        ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
 
-      final legs = options.single.busLegs;
-      expect(
-        displayedLegArrival(legs[0], null),
-        DateTime(2026, 6, 11, 12, 22),
-      );
-      // 12:22 → 12:24: vaihto onnistuu (ei "voi jäädä").
-      expect(transferLatenessMinutes(legs[0], legs[1], null), -2);
-    });
+        final legs = options.single.busLegs;
+        expect(
+          displayedLegArrival(legs[0], null),
+          DateTime(2026, 6, 11, 12, 22),
+        );
+        // 12:22 → 12:24: vaihto onnistuu (ei "voi jäädä").
+        expect(transferLatenessMinutes(legs[0], legs[1], null), -2);
+      },
+    );
 
-    test('järjestää vaihtoehdot viiveen huomioivan lähtöajan mukaan',
-        () async {
+    test('järjestää vaihtoehdot viiveen huomioivan lähtöajan mukaan', () async {
       const walk = Duration(minutes: 3);
       // A: bussi 12:00, 10 min myöhässä. B: bussi 12:04 ajallaan.
       final plan = planJson([
@@ -901,75 +910,77 @@ void main() {
       ]);
     });
 
-    test('OTP:n oma ehdotus säilyy, vaikka toinen ehdotus kattaa lähdön',
-        () async {
-      final dep2 = dep.add(const Duration(minutes: 15));
-      final plan = planJson([
-        itineraryJson([
-          busLegJson(
-            tripId: 'OULU:111',
-            departure: dep,
-            arrival: DateTime(2026, 6, 11, 12, 20),
-            fromStopId: 'OULU:201',
-            toStopId: 'OULU:203',
-          ),
-          busLegJson(
-            tripId: 'OULU:222',
-            departure: DateTime(2026, 6, 11, 12, 30),
-            arrival: DateTime(2026, 6, 11, 12, 50),
-            fromStopId: 'OULU:203',
-            toStopId: 'OULU:205',
-          ),
-        ]),
-        // OTP:n tarkka ehdotus myöhemmälle lähdölle: eri vaihtobussi.
-        itineraryJson([
-          busLegJson(
-            tripId: 'OULU:333',
-            departure: dep2,
-            arrival: DateTime(2026, 6, 11, 12, 35),
-            fromStopId: 'OULU:201',
-            toStopId: 'OULU:203',
-          ),
-          busLegJson(
-            tripId: 'OULU:666',
-            departure: DateTime(2026, 6, 11, 13, 10),
-            arrival: DateTime(2026, 6, 11, 13, 30),
-            fromStopId: 'OULU:203',
-            toStopId: 'OULU:205',
-          ),
-        ]),
-      ]);
-      final timetable = {
-        'stop0': {
-          'gtfsId': 'OULU:201',
-          'stoptimesWithoutPatterns': [
-            stoptimeJson(
+    test(
+      'OTP:n oma ehdotus säilyy, vaikka toinen ehdotus kattaa lähdön',
+      () async {
+        final dep2 = dep.add(const Duration(minutes: 15));
+        final plan = planJson([
+          itineraryJson([
+            busLegJson(
               tripId: 'OULU:111',
-              scheduledDeparture: noonSecs,
-              serviceDay: serviceDay,
+              departure: dep,
+              arrival: DateTime(2026, 6, 11, 12, 20),
+              fromStopId: 'OULU:201',
+              toStopId: 'OULU:203',
             ),
-            stoptimeJson(
+            busLegJson(
+              tripId: 'OULU:222',
+              departure: DateTime(2026, 6, 11, 12, 30),
+              arrival: DateTime(2026, 6, 11, 12, 50),
+              fromStopId: 'OULU:203',
+              toStopId: 'OULU:205',
+            ),
+          ]),
+          // OTP:n tarkka ehdotus myöhemmälle lähdölle: eri vaihtobussi.
+          itineraryJson([
+            busLegJson(
               tripId: 'OULU:333',
-              scheduledDeparture: noonSecs + 900,
-              serviceDay: serviceDay,
+              departure: dep2,
+              arrival: DateTime(2026, 6, 11, 12, 35),
+              fromStopId: 'OULU:201',
+              toStopId: 'OULU:203',
             ),
-          ],
-        },
-      };
+            busLegJson(
+              tripId: 'OULU:666',
+              departure: DateTime(2026, 6, 11, 13, 10),
+              arrival: DateTime(2026, 6, 11, 13, 30),
+              fromStopId: 'OULU:203',
+              toStopId: 'OULU:205',
+            ),
+          ]),
+        ]);
+        final timetable = {
+          'stop0': {
+            'gtfsId': 'OULU:201',
+            'stoptimesWithoutPatterns': [
+              stoptimeJson(
+                tripId: 'OULU:111',
+                scheduledDeparture: noonSecs,
+                serviceDay: serviceDay,
+              ),
+              stoptimeJson(
+                tripId: 'OULU:333',
+                scheduledDeparture: noonSecs + 900,
+                serviceDay: serviceDay,
+              ),
+            ],
+          },
+        };
 
-      final options = await makeService(
-        planClient(plan: plan, timetable: timetable),
-      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+        final options = await makeService(
+          planClient(plan: plan, timetable: timetable),
+        ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
 
-      expect(options, hasLength(2));
-      // Myöhempi lähtö on OTP:n oma ehdotus, ei ensimmäisen kopio.
-      expect(options[1].busLegs[0].tripId, 'OULU:333');
-      expect(options[1].busLegs[1].tripId, 'OULU:666');
-      expect(
-        options[1].busLegs[1].departureTime,
-        DateTime(2026, 6, 11, 13, 10),
-      );
-    });
+        expect(options, hasLength(2));
+        // Myöhempi lähtö on OTP:n oma ehdotus, ei ensimmäisen kopio.
+        expect(options[1].busLegs[0].tripId, 'OULU:333');
+        expect(options[1].busLegs[1].tripId, 'OULU:666');
+        expect(
+          options[1].busLegs[1].departureTime,
+          DateTime(2026, 6, 11, 13, 10),
+        );
+      },
+    );
 
     test('tallentaa kävelyjen kestot', () async {
       final walkStart = dep.subtract(const Duration(minutes: 4));
@@ -999,53 +1010,224 @@ void main() {
       expect(options.single.leaveHomeTime, walkStart);
     });
 
-    test('näyttää vain vaiheen aikana voimassa olevat tiedotteet kerran',
-        () async {
-      int secs(DateTime t) => t.millisecondsSinceEpoch ~/ 1000;
-      final arr = DateTime(2026, 6, 11, 12, 30);
+    test(
+      'näyttää vain vaiheen aikana voimassa olevat tiedotteet kerran',
+      () async {
+        int secs(DateTime t) => t.millisecondsSinceEpoch ~/ 1000;
+        final arr = DateTime(2026, 6, 11, 12, 30);
+        final plan = planJson([
+          itineraryJson([
+            busLegJson(
+              tripId: 'OULU:111',
+              departure: dep,
+              arrival: arr,
+              fromStopId: 'OULU:201',
+              toStopId: 'OULU:205',
+              alerts: [
+                {
+                  'alertHeaderText': 'Poikkeusreitti',
+                  'effectiveStartDate': secs(DateTime(2026, 6, 11, 6)),
+                  'effectiveEndDate': secs(DateTime(2026, 6, 11, 18)),
+                },
+                // Sama tiedote toista kautta (esim. pysäkki) – vain kerran.
+                {
+                  'alertHeaderText': 'Poikkeusreitti',
+                  'effectiveStartDate': null,
+                  'effectiveEndDate': null,
+                },
+                // Päättynyt eilen.
+                {
+                  'alertHeaderText': 'Vanha tiedote',
+                  'effectiveStartDate': secs(DateTime(2026, 6, 9)),
+                  'effectiveEndDate': secs(DateTime(2026, 6, 10)),
+                },
+              ],
+            ),
+          ]),
+        ]);
+
+        final options = await makeService(
+          planClient(plan: plan, timetable: {}),
+        ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+
+        final leg = options.single.busLegs.single;
+        // Kaikki tiedotteet talteen (kopioitu lähtö voi osua eri aikaan)…
+        expect(leg.alerts, hasLength(3));
+        // …mutta näytetään vain vaiheen aikana voimassa olevat, kerran.
+        expect(activeLegAlerts(leg, null).map((a) => a.text), [
+          'Poikkeusreitti',
+        ]);
+      },
+    );
+
+    test('pudottaa bussin, joka on jo ohittanut nousupysäkin', () async {
+      // Kello 12:05. Bussi A (aikataulu 12:00) lähti ajallaan, mutta jäi
+      // matkalla 10 min jälkeen; OTP kopioi +10 min ohitetuille pysäkeille
+      // ja ehdottaa sitä lähtevänä 12:10. Bussi B (12:20) on aidosti tulossa.
+      final now = DateTime(2026, 6, 11, 12, 5);
       final plan = planJson([
         itineraryJson([
           busLegJson(
             tripId: 'OULU:111',
             departure: dep,
-            arrival: arr,
+            arrival: DateTime(2026, 6, 11, 12, 30),
             fromStopId: 'OULU:201',
             toStopId: 'OULU:205',
-            alerts: [
-              {
-                'alertHeaderText': 'Poikkeusreitti',
-                'effectiveStartDate': secs(DateTime(2026, 6, 11, 6)),
-                'effectiveEndDate': secs(DateTime(2026, 6, 11, 18)),
-              },
-              // Sama tiedote toista kautta (esim. pysäkki) – vain kerran.
-              {
-                'alertHeaderText': 'Poikkeusreitti',
-                'effectiveStartDate': null,
-                'effectiveEndDate': null,
-              },
-              // Päättynyt eilen.
-              {
-                'alertHeaderText': 'Vanha tiedote',
-                'effectiveStartDate': secs(DateTime(2026, 6, 9)),
-                'effectiveEndDate': secs(DateTime(2026, 6, 10)),
-              },
-            ],
+            departureDelaySec: 600,
+            arrivalDelaySec: 600,
+            realTime: true,
+          ),
+        ]),
+        itineraryJson([
+          busLegJson(
+            tripId: 'OULU:222',
+            departure: DateTime(2026, 6, 11, 12, 20),
+            arrival: DateTime(2026, 6, 11, 12, 50),
+            fromStopId: 'OULU:201',
+            toStopId: 'OULU:205',
           ),
         ]),
       ]);
+      Map<String, dynamic> row(String stopId, int schedMin, int delaySec) => {
+        'stop': {'gtfsId': stopId},
+        'scheduledArrival': noonSecs + schedMin * 60,
+        'scheduledDeparture': noonSecs + schedMin * 60,
+        'realtimeArrival': noonSecs + schedMin * 60 + delaySec,
+        'realtimeDeparture': noonSecs + schedMin * 60 + delaySec,
+        'realtime': true,
+        'realtimeState': 'UPDATED',
+        'serviceDay': serviceDay,
+      };
+      final List<String> realtimeQueries = [];
+      final client = MockClient((request) async {
+        final body = request.body;
+        if (body.contains('plan(')) {
+          return http.Response(
+            json.encode({'data': plan}),
+            200,
+            headers: _jsonHeaders,
+          );
+        }
+        if (body.contains('stoptimesForDate')) {
+          realtimeQueries.add(body);
+          return http.Response(
+            json.encode({
+              'data': {
+                'trip0': {
+                  'gtfsId': 'OULU:111',
+                  // Vuoro alkoi 11:50; käyttäjä nousee keskeltä reittiä.
+                  'stoptimesForDate': [
+                    row('OULU:200', -10, 600), // kopioitu
+                    row('OULU:201', 0, 600), // kopioitu (nousupysäkki)
+                    row('OULU:202', 2, 600), // lähde: ensimmäinen raportoitu
+                    row('OULU:203', 4, 600), // mahdollinen sama ennuste
+                    row('OULU:204', 7, 540), // aito ennuste
+                  ],
+                },
+              },
+            }),
+            200,
+            headers: _jsonHeaders,
+          );
+        }
+        return http.Response(
+          json.encode({'data': {}}),
+          200,
+          headers: _jsonHeaders,
+        );
+      });
 
-      final options = await makeService(
-        planClient(plan: plan, timetable: {}),
-      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, dep, 120, 1.4);
+      final options = await TransitService(
+        digitransitKey: 'test-key',
+        walttiClientId: 'client-id',
+        walttiClientSecret: 'client-secret',
+        client: client,
+        clock: () => now,
+      ).fetchRoutes(65.0, 25.4, 65.1, 25.5, now, 120, 1.4);
 
-      final leg = options.single.busLegs.single;
-      // Kaikki tiedotteet talteen (kopioitu lähtö voi osua eri aikaan)…
-      expect(leg.alerts, hasLength(3));
-      // …mutta näytetään vain vaiheen aikana voimassa olevat, kerran.
-      expect(activeLegAlerts(leg, null).map((a) => a.text), [
-        'Poikkeusreitti',
-      ]);
+      // Vain jo ohi mennyt (aikataulu ennen hakuhetkeä) tarkistettiin.
+      expect(realtimeQueries, hasLength(1));
+      expect(realtimeQueries.single, contains('OULU:111'));
+      expect(realtimeQueries.single, isNot(contains('OULU:222')));
+      expect(options.map((o) => o.busLegs.single.tripId), ['OULU:222']);
     });
+
+    test(
+      'kun kaikki ehdotukset ovat menneet, hakee seuraavan lähdön',
+      () async {
+        // Illan viimeinen bussi A lähti ajallaan 12:00 ja näyttää kopioidun
+        // viiveen takia lähtevän 12:10. Seuraava oikea lähtö B on 12:40.
+        final now = DateTime(2026, 6, 11, 12, 5);
+        Map<String, dynamic> itinerary(String tripId, DateTime d, int delay) =>
+            planJson([
+              itineraryJson([
+                busLegJson(
+                  tripId: tripId,
+                  departure: d,
+                  arrival: d.add(const Duration(minutes: 30)),
+                  fromStopId: 'OULU:201',
+                  toStopId: 'OULU:205',
+                  departureDelaySec: delay,
+                  arrivalDelaySec: delay,
+                  realTime: delay != 0,
+                ),
+              ]),
+            ]);
+        final planA = itinerary('OULU:111', dep, 600);
+        final planB = itinerary('OULU:999', DateTime(2026, 6, 11, 12, 40), 0);
+        Map<String, dynamic> row(String stopId, int schedMin, int delaySec) => {
+          'stop': {'gtfsId': stopId},
+          'scheduledArrival': noonSecs + schedMin * 60,
+          'scheduledDeparture': noonSecs + schedMin * 60,
+          'realtimeArrival': noonSecs + schedMin * 60 + delaySec,
+          'realtimeDeparture': noonSecs + schedMin * 60 + delaySec,
+          'realtime': true,
+          'realtimeState': 'UPDATED',
+          'serviceDay': serviceDay,
+        };
+        int planCalls = 0;
+        final client = MockClient((request) async {
+          final body = request.body;
+          Map<String, dynamic> data;
+          if (body.contains('plan(')) {
+            // Ensimmäinen haku löytää vain A:n, uusintahaut B:n.
+            data = planCalls++ == 0 ? planA : planB;
+          } else if (body.contains('stoptimesForDate')) {
+            data = {
+              'trip0': {
+                'gtfsId': 'OULU:111',
+                'stoptimesForDate': [
+                  row('OULU:200', -10, 600),
+                  row('OULU:201', 0, 600),
+                  row('OULU:202', 2, 600),
+                  row('OULU:203', 4, 600),
+                  row('OULU:204', 7, 540),
+                ],
+              },
+            };
+          } else {
+            data = {};
+          }
+          return http.Response(
+            json.encode({'data': data}),
+            200,
+            headers: _jsonHeaders,
+          );
+        });
+
+        final options = await TransitService(
+          digitransitKey: 'test-key',
+          walttiClientId: 'client-id',
+          walttiClientSecret: 'client-secret',
+          client: client,
+          clock: () => now,
+        ).fetchRoutes(65.0, 25.4, 65.1, 25.5, now, 120, 1.4);
+
+        expect(options.map((o) => o.busLegs.single.tripId), ['OULU:999']);
+        // Alkuperäinen haku + 24 h:n lähtöhaku + varsinainen haku.
+        expect(planCalls, 3);
+      },
+    );
 
     test('GraphQL-virhe ilman plan-osaa heittää poikkeuksen', () {
       final client = MockClient((request) async {
@@ -1085,13 +1267,15 @@ void main() {
       isRealtime: false,
     );
 
-    test('kysyy vuoron ajat liikennöintipäivälle (stoptimesForDate)',
-        () async {
+    test('kysyy vuoron ajat liikennöintipäivälle (stoptimesForDate)', () async {
       late String body;
       final client = MockClient((request) async {
         body = request.body;
-        return http.Response(json.encode({'data': {}}), 200,
-            headers: _jsonHeaders);
+        return http.Response(
+          json.encode({'data': {}}),
+          200,
+          headers: _jsonHeaders,
+        );
       });
 
       await makeService(client).fetchTripRealtime([
@@ -1110,13 +1294,16 @@ void main() {
       late String body;
       final client = MockClient((request) async {
         body = request.body;
-        return http.Response(json.encode({'data': {}}), 200,
-            headers: _jsonHeaders);
+        return http.Response(
+          json.encode({'data': {}}),
+          200,
+          headers: _jsonHeaders,
+        );
       });
 
-      await makeService(client).fetchTripRealtime([
-        for (int i = 0; i < 35; i++) leg('OULU:$i'),
-      ]);
+      await makeService(
+        client,
+      ).fetchTripRealtime([for (int i = 0; i < 35; i++) leg('OULU:$i')]);
 
       expect('trip(id:'.allMatches(body), hasLength(30));
       expect(body, contains('OULU:0'));
@@ -1174,6 +1361,60 @@ void main() {
       expect(stop.realtimeState, 'UPDATED');
     });
 
+    test('merkitsee ohitetuille pysäkeille kopioidut ajat', () async {
+      final serviceDay = DateTime(2026, 6, 11).millisecondsSinceEpoch ~/ 1000;
+      Map<String, dynamic> row(String stopId, int schedSec, int delay) => {
+        'stop': {'gtfsId': stopId},
+        'scheduledArrival': schedSec,
+        'scheduledDeparture': schedSec,
+        'realtimeArrival': schedSec + delay,
+        'realtimeDeparture': schedSec + delay,
+        'realtime': true,
+        'realtimeState': 'UPDATED',
+        'serviceDay': serviceDay,
+      };
+      final client = MockClient((request) async {
+        return http.Response(
+          json.encode({
+            'data': {
+              'trip0': {
+                'gtfsId': 'OULU:111',
+                'stoptimesForDate': [
+                  row('OULU:201', 12 * 3600, 240),
+                  row('OULU:202', 12 * 3600 + 180, 240),
+                  row('OULU:203', 12 * 3600 + 360, 240),
+                  row('OULU:204', 12 * 3600 + 540, 240),
+                  row('OULU:206', 12 * 3600 + 720, 213),
+                ],
+              },
+            },
+          }),
+          200,
+          headers: _jsonHeaders,
+        );
+      });
+
+      final result = await TransitService(
+        digitransitKey: 'test-key',
+        walttiClientId: 'client-id',
+        walttiClientSecret: 'client-secret',
+        client: client,
+        clock: () => DateTime(2026, 6, 11, 12, 7),
+      ).fetchTripRealtime([leg('OULU:111')]);
+
+      final visits = result!['OULU:111']!.visitsByStopId;
+      StopRealtime only(String id) => visits[id]!.single;
+      expect(only('OULU:201').isBackfilled, isTrue);
+      expect(only('OULU:201').isPassed, isTrue);
+      expect(only('OULU:202').isBackfilled, isTrue);
+      expect(only('OULU:202').isPassed, isTrue);
+      // Jakson kaksi viimeistä jätetään aidoiksi (lähde + mahdollinen
+      // samanarvoinen ennuste), samoin sen jälkeiset.
+      expect(only('OULU:203').isBackfilled, isFalse);
+      expect(only('OULU:204').isBackfilled, isFalse);
+      expect(only('OULU:206').isBackfilled, isFalse);
+    });
+
     test('rengasreitin pysäkin molemmat käynnit säilyvät', () async {
       final serviceDay = DateTime(2026, 6, 11).millisecondsSinceEpoch ~/ 1000;
       Map<String, dynamic> row(int scheduled, int realtime) => {
@@ -1229,9 +1470,7 @@ void main() {
     });
 
     test('palauttaa null virheestä, jotta vanha data säilyy', () async {
-      final client = MockClient(
-        (request) async => http.Response('error', 500),
-      );
+      final client = MockClient((request) async => http.Response('error', 500));
 
       expect(
         await makeService(client).fetchTripRealtime([leg('OULU:111')]),
@@ -1273,8 +1512,7 @@ void main() {
   });
 
   group('fetchTripRoute', () {
-    test('hakee vuoron pysäkit liikennöintipäivältä reaaliaikoineen',
-        () async {
+    test('hakee vuoron pysäkit liikennöintipäivältä reaaliaikoineen', () async {
       late String body;
       final client = MockClient((request) async {
         body = request.body;
@@ -1318,8 +1556,13 @@ void main() {
       late String body;
       final client = MockClient((request) async {
         body = request.body;
-        return http.Response(json.encode({'data': {'trip': null}}), 200,
-            headers: _jsonHeaders);
+        return http.Response(
+          json.encode({
+            'data': {'trip': null},
+          }),
+          200,
+          headers: _jsonHeaders,
+        );
       });
 
       await makeService(
@@ -1332,9 +1575,7 @@ void main() {
 
   group('fetchNearbyStops', () {
     test('palauttaa tyhjän listan virheestä kaatumatta', () async {
-      final client = MockClient(
-        (request) async => http.Response('error', 500),
-      );
+      final client = MockClient((request) async => http.Response('error', 500));
 
       final stops = await makeService(
         client,

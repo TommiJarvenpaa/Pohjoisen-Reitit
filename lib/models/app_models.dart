@@ -138,11 +138,21 @@ class StopRealtime {
   /// toisistaan, jos vuoro käy pysäkillä kahdesti (rengasreitti).
   final DateTime? scheduled;
 
+  /// Bussi on jo ohittanut pysäkin: reaaliaikasyöte ei enää raportoi sitä.
+  final bool isPassed;
+
+  /// Ajat ovat OTP:n taaksepäin kopioimia (Oulun asetus
+  /// backwardsDelayPropagationType ALWAYS kopioi myöhemmän pysäkin viiveen
+  /// ohitetuille pysäkeille), eivät aitoja ennusteita tai toteumia.
+  final bool isBackfilled;
+
   StopRealtime({
     this.arrival,
     this.departure,
     this.realtimeState = 'UPDATED',
     this.scheduled,
+    this.isPassed = false,
+    this.isBackfilled = false,
   });
 }
 

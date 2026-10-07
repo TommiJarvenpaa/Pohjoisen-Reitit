@@ -1031,8 +1031,14 @@ class _BusLegSectionState extends State<BusLegSection> {
         stopName,
       ];
     } else if (progress.hasDeparted) {
+      // Lähtöaika ei voi olla tulevaisuudessa (ks. departedTime).
+      final DateTime departed = departedTime(
+        leg,
+        widget.tripRealtime,
+        widget.now ?? DateTime.now(),
+      );
       parts = [
-        Text('${fmt(realtimeDep)} · ${leg.fromStop}', style: struck),
+        Text('${fmt(departed)} · ${leg.fromStop}', style: struck),
         Text('lähti', style: TextStyle(color: Colors.grey[700], fontSize: 12)),
       ];
     } else {

@@ -140,6 +140,235 @@ void main() {
     });
   });
 
+  group('taaksepäin kopioitu viive (ohitetut pysäkit)', () {
+    final now = DateTime(2026, 6, 11, 12, 30);
+    List<DateTime> minutesFromNoon(List<int> minutes) => [
+      for (final m in minutes) DateTime(2026, 6, 11, 12, m),
+    ];
+
+    test('tunnistaa vuoron alun yhtenäisen saman viiveen jakson', () {
+      // Kuten oikeassa datassa: ohitetuilla pysäkeillä täsmälleen sama
+      // +236 s, sitten aidot arviot. Jakson kaksi viimeistä jätetään
+      // aidoiksi (kopioinnin lähde ja mahdollinen samanarvoinen ennuste).
+      final b = detectBackfill(
+        [236, 236, 236, 236, 236, 213, 200],
+        minutesFromNoon([0, 3, 6, 9, 12, 15, 18]),
+        now,
+      );
+      expect(b.copies, 3);
+      expect(b.passed, 3);
+    });
+
+    test('koko vuoron sama viive tai lyhyt jakso ei ole kopiointia', () {
+      final times = minutesFromNoon([0, 3, 6, 9]);
+      expect(detectBackfill([60, 60, 60, 60], times, now).copies, 0);
+      expect(detectBackfill([60, 75, 75, 90], times, now).copies, 0);
+      // Kahden pysäkin jakso voi olla lähde + aito ennuste.
+      expect(detectBackfill([60, 60, 75, 90], times, now).copies, 0);
+    });
+
+    test('pysäkki, jonka aikataulu ei ole vielä mennyt, ei ole ohitettu', () {
+      final soon = detectBackfill(
+        [120, 120, 120, 90],
+        minutesFromNoon([25, 28, 31, 34]),
+        now,
+      );
+      expect(soon.copies, 1);
+      expect(soon.passed, 1);
+
+      final later = detectBackfill(
+        [120, 120, 120, 90],
+        minutesFromNoon([40, 43, 46, 49]),
+        now,
+      );
+      expect(later.copies, 1);
+      expect(later.passed, 0);
+    });
+
+    test('päätepysäkillä myöhässä olevaa vuoroa ei merkitä lähteneeksi', () {
+      // Vuoro lähtisi 12:25, mutta bussi on vielä edellisellä kierroksella
+      // (+10 min). Syöte raportoi vasta myöhemmältä pysäkiltä, joten OTP
+      // kopioi viiveen alkuun – kopio, mutta bussi ei ole lähtenyt.
+      final b = detectBackfill(
+        [600, 600, 600, 540],
+        minutesFromNoon([25, 28, 31, 34]),
+        now,
+      );
+      expect(b.copies, 1);
+      expect(b.passed, 0);
+    });
+
+    // Käyttäjän esimerkki: bussi lähti pysäkiltä ajallaan 12:00, jäi matkalla
+    // 4 min jälkeen, ja OTP kopioi +4 min ohitetulle pysäkille (12:04).
+    Map<String, TripRealtime> backfilledBoarding() => {
+      'OULU:111': TripRealtime(
+        byStopId: {
+          'OULU:201': StopRealtime(
+            departure: DateTime(2026, 6, 11, 12, 4),
+            scheduled: DateTime(2026, 6, 11, 12, 0),
+            isPassed: true,
+            isBackfilled: true,
+          ),
+        },
+      ),
+    };
+
+    test('kopioitua aikaa ei näytetä lähtöaikana', () {
+      final data = backfilledBoarding();
+
+      expect(getRealtimeStopTime(data, makeLeg(), 'OULU:201'), isNull);
+      expect(hasPassedStop(data, makeLeg(), 'OULU:201'), isTrue);
+      expect(legDepartureSource(makeLeg(), data), RealtimeSource.schedule);
+    });
+
+    test('bussi on lähtenyt, vaikka kopioitu aika on vielä tulossa', () {
+      final option = RouteOption(
+        leaveHomeTime: DateTime(2026, 6, 11, 11, 55),
+        arrivalTime: DateTime(2026, 6, 11, 12, 40),
+        busLegs: [makeLeg()],
+        segments: [],
+      );
+      // Kello 12:02: kopioitu lähtö 12:04 näyttäisi tulevalta.
+      final s = tripStatus(
+        option,
+        backfilledBoarding(),
+        DateTime(2026, 6, 11, 12, 2),
+      );
+
+      expect(s.phase, TripPhase.departed);
+      expect(s.busDeparture, DateTime(2026, 6, 11, 12, 0));
+      expect(
+        legProgress(
+          makeLeg(),
+          backfilledBoarding(),
+          DateTime(2026, 6, 11, 12, 2),
+        ).hasDeparted,
+        isTrue,
+      );
+    });
+
+    test('muistaa viimeisen aidon ennusteen ennen ohitusta', () {
+      final before = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(
+              departure: DateTime(2026, 6, 11, 12, 0, 20),
+              scheduled: DateTime(2026, 6, 11, 12, 0),
+            ),
+          },
+        ),
+      };
+
+      final merged = mergeTripRealtime(before, backfilledBoarding());
+      final leg = makeLeg();
+
+      expect(
+        getRealtimeStopTime(merged, leg, 'OULU:201'),
+        DateTime(2026, 6, 11, 12, 0, 20),
+      );
+      expect(hasPassedStop(merged, leg, 'OULU:201'), isTrue);
+      // Seuraavakin kopioitu päivitys ei muuta jäädytettyä aikaa.
+      final again = mergeTripRealtime(merged, backfilledBoarding());
+      expect(
+        getRealtimeStopTime(again, leg, 'OULU:201'),
+        DateTime(2026, 6, 11, 12, 0, 20),
+      );
+    });
+
+    test('ohitettu pysyy ohitettuna, vaikka tunnistus katoaa', () {
+      // Vuoron lopussa koko jäljellä oleva osa voi olla samaa viivettä,
+      // jolloin uusi haku ei enää tunnista kopiointia.
+      final undetected = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(
+              departure: DateTime(2026, 6, 11, 12, 4),
+              scheduled: DateTime(2026, 6, 11, 12, 0),
+            ),
+          },
+        ),
+      };
+
+      final merged = mergeTripRealtime(backfilledBoarding(), undetected);
+
+      expect(hasPassedStop(merged, makeLeg(), 'OULU:201'), isTrue);
+      expect(getRealtimeStopTime(merged, makeLeg(), 'OULU:201'), isNull);
+    });
+
+    test('etuajassa lähteneen bussin aito lähtöaika ei korvaudu kopiolla', () {
+      // Bussi lähti 11:58 (aikataulu 12:00). Kello 11:59 syöte ei enää
+      // raportoi pysäkkiä ja OTP kopioi sille viiveen 0 (12:00); aikataulu ei
+      // ole vielä mennyt, joten pysäkkiä ei merkitä ohitetuksi.
+      final before = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(
+              departure: DateTime(2026, 6, 11, 11, 58),
+              scheduled: DateTime(2026, 6, 11, 12, 0),
+            ),
+          },
+        ),
+      };
+      final copy = {
+        'OULU:111': TripRealtime(
+          byStopId: {
+            'OULU:201': StopRealtime(
+              departure: DateTime(2026, 6, 11, 12, 0),
+              scheduled: DateTime(2026, 6, 11, 12, 0),
+              isBackfilled: true,
+            ),
+          },
+        ),
+      };
+
+      final merged = mergeTripRealtime(before, copy);
+
+      expect(
+        getRealtimeStopTime(merged, makeLeg(), 'OULU:201'),
+        DateTime(2026, 6, 11, 11, 58),
+      );
+    });
+
+    test('lähteneen bussin lähtöaika ei ole tulevaisuudessa', () {
+      // Hakuhetken ennuste 12:04, mutta syöte kertoo bussin ohittaneen
+      // pysäkin jo kello 12:02 – näytetään aikataulun aika.
+      final leg = makeLeg(
+        realtimeDeparture: DateTime(2026, 6, 11, 12, 4),
+        isRealtime: true,
+      );
+
+      expect(
+        departedTime(leg, backfilledBoarding(), DateTime(2026, 6, 11, 12, 2)),
+        DateTime(2026, 6, 11, 12, 0),
+      );
+    });
+
+    test('seuraavaksi lähdöksi ei tarjota jo ohittanutta bussia', () {
+      RouteOption option(String tripId, DateTime dep) => RouteOption(
+        leaveHomeTime: dep.subtract(const Duration(minutes: 5)),
+        arrivalTime: dep.add(const Duration(minutes: 30)),
+        busLegs: [makeLeg(tripId: tripId, departureTime: dep)],
+        segments: [],
+      );
+      final options = [
+        option('OULU:100', DateTime(2026, 6, 11, 11, 50)),
+        option('OULU:111', DateTime(2026, 6, 11, 12, 0)),
+        option('OULU:222', DateTime(2026, 6, 11, 12, 20)),
+      ];
+
+      // Kello 11:58: 12:00-bussi on jo ohittanut pysäkin (kopioitu aika).
+      expect(
+        nextSameLineDeparture(
+          options,
+          0,
+          backfilledBoarding(),
+          DateTime(2026, 6, 11, 11, 58),
+        ),
+        DateTime(2026, 6, 11, 12, 20),
+      );
+    });
+  });
+
   group('clockMinutesBetween', () {
     test('laskee eron näytetyistä kellonajoista (kuvakaappauksen tapaus)', () {
       // 07:46:40 → 07:54:10 näkyy "07:46 → 07:54": +8, ei +7.

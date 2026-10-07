@@ -43,8 +43,9 @@ bool _isCanceled(StopRealtime? rt) => rt?.realtimeState == 'CANCELED';
 /// Pysäkin reaaliaikainen lähtöaika (tai saapuminen, jos lähtöä ei ole).
 /// [near] = pysäkin aikataulun mukainen aika, oletuksena vaiheen lähtöaika.
 ///
-/// Perutulle pysäkille palautuu null: OTP antaa perutun pysäkin ajaksi
-/// aikataulun ajan, joka näyttäisi muuten "ajallaan"-tiedolta.
+/// Null perutulle pysäkille (OTP antaa sen ajaksi aikataulun ajan, joka
+/// näyttäisi "ajallaan"-tiedolta) ja taaksepäin kopioidulle ajalle (ohitetun
+/// pysäkin "viive" on myöhemmin syntynyt viive, ei toteutunut lähtö).
 DateTime? getRealtimeStopTime(
   Map<String, TripRealtime>? tripRealtime,
   BusLeg leg,
@@ -53,14 +54,14 @@ DateTime? getRealtimeStopTime(
 }) {
   final DateTime reference = near ?? leg.departureTime;
   final rt = _stopRealtime(tripRealtime, leg, stopId, reference);
-  if (rt == null || _isCanceled(rt)) return null;
+  if (rt == null || _isCanceled(rt) || rt.isBackfilled) return null;
   return _plausible(rt.departure, reference) ??
       _plausible(rt.arrival, reference);
 }
 
 /// Pysäkin reaaliaikainen saapumisaika (tai lähtö, jos saapumista ei ole).
 /// [near] = pysäkin aikataulun mukainen aika, oletuksena vaiheen saapumisaika.
-/// Perutulle pysäkille null, ks. [getRealtimeStopTime].
+/// Null perutulle pysäkille ja kopioidulle ajalle, ks. [getRealtimeStopTime].
 DateTime? getRealtimeArrivalTime(
   Map<String, TripRealtime>? tripRealtime,
   BusLeg leg,
@@ -69,9 +70,157 @@ DateTime? getRealtimeArrivalTime(
 }) {
   final DateTime reference = near ?? leg.arrivalTime;
   final rt = _stopRealtime(tripRealtime, leg, stopId, reference);
-  if (rt == null || _isCanceled(rt)) return null;
+  if (rt == null || _isCanceled(rt) || rt.isBackfilled) return null;
   return _plausible(rt.arrival, reference) ??
       _plausible(rt.departure, reference);
+}
+
+/// Onko bussi reaaliaikasyötteen mukaan jo ohittanut pysäkin – riippumatta
+/// siitä, mitä kellonaika näyttää (kopioitu aika voi olla tulevaisuudessa).
+/// [near] = pysäkin aikataulun mukainen aika, oletuksena vaiheen lähtöaika.
+bool hasPassedStop(
+  Map<String, TripRealtime>? tripRealtime,
+  BusLeg leg,
+  String stopId, {
+  DateTime? near,
+}) =>
+    _stopRealtime(
+      tripRealtime,
+      leg,
+      stopId,
+      near ?? leg.departureTime,
+    )?.isPassed ??
+    false;
+
+/// Vuoron alun taaksepäin kopioidut pysäkit, ks. [detectBackfill].
+class BackfillInfo {
+  /// Montako alun pysäkkiä on kopioita: niiden aikaa ei näytetä aitona.
+  final int copies;
+
+  /// Montako alun pysäkkiä bussi on varmasti jo ohittanut (≤ [copies]).
+  final int passed;
+
+  const BackfillInfo(this.copies, this.passed);
+
+  static const none = BackfillInfo(0, 0);
+}
+
+/// Tunnistaa OTP:n taaksepäin kopioimat ajat.
+///
+/// Oulun reaaliaikasyöte lakkaa raportoimasta ohitettuja pysäkkejä, ja
+/// Digitransitin asetus (backwardsDelayPropagationType ALWAYS) kopioi
+/// ensimmäisen raportoidun pysäkin saapumisviiveen kaikille sitä
+/// edeltäville. Tunnusmerkki on vuoron alun yhtenäinen jakso täsmälleen
+/// samaa viivettä. Aitoja sekuntitarkkoja arvoja ei ole näin tasaisesti
+/// peräkkäin – varmuuden vuoksi jakson kaksi viimeistä pysäkkiä jätetään
+/// aidoiksi (kopioinnin lähde ja mahdollinen samanarvoinen aito ennuste).
+///
+/// Kopio ei vielä tarkoita, että pysäkki olisi ajettu: ennen lähtöä
+/// päätepysäkillä myöhässä olevan vuoron alku voi myös olla kopioitu.
+/// Ohitetuksi lasketaan kopio vain, jos
+/// - vuoro on lähtenyt liikkeelle: ensimmäisen pysäkin kopioitu aika
+///   (aikataulu + nykyinen viive) on mennyt, ja
+/// - pysäkin aikataulun mukainen aika on mennyt.
+///
+/// [arrivalDelays] ja [scheduledTimes] reaaliaikaisilta pysäkeiltä
+/// ajojärjestyksessä (sekunteina ja aikoina).
+BackfillInfo detectBackfill(
+  List<int> arrivalDelays,
+  List<DateTime> scheduledTimes,
+  DateTime now,
+) {
+  final int n = arrivalDelays.length;
+  if (n < 4 || scheduledTimes.length != n) return BackfillInfo.none;
+  int k = 1;
+  while (k < n && arrivalDelays[k] == arrivalDelays[0]) {
+    k++;
+  }
+  // Koko vuoro samalla viiveellä (esim. vuorotason viive): ei tunnistettavissa.
+  if (k == n) return BackfillInfo.none;
+  final int copies = k - 2;
+  if (copies <= 0) return BackfillInfo.none;
+
+  final bool hasStarted = scheduledTimes[0]
+      .add(Duration(seconds: arrivalDelays[0]))
+      .isBefore(now);
+  int passed = 0;
+  if (hasStarted) {
+    while (passed < copies && scheduledTimes[passed].isBefore(now)) {
+      passed++;
+    }
+  }
+  return BackfillInfo(copies, passed);
+}
+
+/// Lähteneen bussin näytettävä lähtöaika. Jos syötteen mukaan ohitetun
+/// pysäkin ennuste on vielä tulevaisuudessa (ennuste ei toteutunut tai se on
+/// hakuhetken tilannekuva), näytetään aikataulun mukainen aika – lähtöaika
+/// ei voi olla tulevaisuudessa.
+DateTime departedTime(
+  BusLeg leg,
+  Map<String, TripRealtime>? tripRealtime,
+  DateTime now,
+) {
+  final DateTime departure =
+      realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
+  if (!departure.isAfter(now)) return departure;
+  return leg.departureTime.isAfter(now) ? now : leg.departureTime;
+}
+
+/// Yhdistää uuden reaaliaikahaun edelliseen:
+/// - kun pysäkin aika muuttuu kopioksi, säilytetään edellisen haun aito
+///   ennuste – se on lähin arvio toteutuneesta lähdöstä,
+/// - ohitettu pysäkki pysyy ohitettuna, vaikka uusi haku ei enää
+///   tunnistaisi kopiointia (bussi ei palaa pysäkille).
+Map<String, TripRealtime> mergeTripRealtime(
+  Map<String, TripRealtime>? previous,
+  Map<String, TripRealtime> latest,
+) {
+  if (previous == null || previous.isEmpty) return latest;
+  final Map<String, TripRealtime> merged = {};
+  latest.forEach((tripId, trip) {
+    final TripRealtime? previousTrip = previous[tripId];
+    if (previousTrip == null) {
+      merged[tripId] = trip;
+      return;
+    }
+    merged[tripId] = TripRealtime.fromVisits({
+      for (final entry in trip.visitsByStopId.entries)
+        entry.key: [
+          for (final visit in entry.value)
+            _keepEarlierPrediction(visit, previousTrip, entry.key),
+        ],
+    });
+  });
+  return merged;
+}
+
+StopRealtime _keepEarlierPrediction(
+  StopRealtime visit,
+  TripRealtime previousTrip,
+  String stopId,
+) {
+  if (visit.scheduled == null) return visit;
+  final StopRealtime? earlier = previousTrip.visitNear(
+    stopId,
+    visit.scheduled!,
+  );
+  if (earlier == null || earlier.scheduled != visit.scheduled) return visit;
+
+  // Ohitettu pysyy ohitettuna (paitsi jos vuoro on sittemmin peruttu).
+  if (earlier.isPassed && visit.realtimeState != 'CANCELED') return earlier;
+
+  // Kopioksi muuttunut aika: edellinen aito ennuste on parempi.
+  if (visit.isBackfilled && !earlier.isBackfilled) {
+    return StopRealtime(
+      arrival: earlier.arrival,
+      departure: earlier.departure,
+      realtimeState: earlier.realtimeState,
+      scheduled: visit.scheduled,
+      isPassed: visit.isPassed,
+    );
+  }
+  return visit;
 }
 
 /// Ohittaako vuoro pysäkin live-tiedon mukaan (peruttu vuoro tai pysäkki,
@@ -369,7 +518,10 @@ LegProgress legProgress(
 ) {
   final DateTime departure =
       realtimeLegDeparture(leg, tripRealtime) ?? leg.departureTime;
-  if (!_isPast(departure, now)) {
+  // Syötteen mukaan ohitettu pysäkki on ohitettu, vaikka kellonaika (esim.
+  // taaksepäin kopioitu viive) näyttäisi vielä tulevalta.
+  if (!hasPassedStop(tripRealtime, leg, leg.fromStopId) &&
+      !_isPast(departure, now)) {
     return LegProgress(
       hasDeparted: false,
       passedStops: 0,
@@ -386,7 +538,16 @@ LegProgress legProgress(
       leg,
       tripRealtime,
     );
-    if (!_isPast(estimate.time, now)) {
+    final String? stopId = _intermediateStopId(leg, i);
+    final bool isPassedByFeed =
+        stopId != null &&
+        hasPassedStop(
+          tripRealtime,
+          leg,
+          stopId,
+          near: leg.intermediateStops[i].scheduledTime ?? estimate.time,
+        );
+    if (!isPassedByFeed && !_isPast(estimate.time, now)) {
       nextIsLive = estimate.isLive;
       break;
     }
@@ -395,7 +556,9 @@ LegProgress legProgress(
 
   final bool allPassed = passed == leg.intermediateStops.length;
   final bool hasArrived =
-      allPassed && _isPast(displayedLegArrival(leg, tripRealtime), now);
+      allPassed &&
+      (hasPassedStop(tripRealtime, leg, leg.toStopId, near: leg.arrivalTime) ||
+          _isPast(displayedLegArrival(leg, tripRealtime), now));
   if (allPassed) {
     nextIsLive =
         getRealtimeArrivalTime(tripRealtime, leg, leg.toStopId) != null;
@@ -472,8 +635,14 @@ TripStatus tripStatus(
     final BusLeg first = option.busLegs.first;
     busDeparture =
         realtimeLegDeparture(first, tripRealtime) ?? first.departureTime;
-    if (_isPast(busDeparture, now)) {
-      return TripStatus(TripPhase.departed, busDeparture: busDeparture);
+    // Ohitettu nousupysäkki: bussi on mennyt, vaikka taaksepäin kopioitu
+    // viive näyttäisi lähdön vielä tulevan.
+    if (hasPassedStop(tripRealtime, first, first.fromStopId) ||
+        _isPast(busDeparture, now)) {
+      return TripStatus(
+        TripPhase.departed,
+        busDeparture: departedTime(first, tripRealtime, now),
+      );
     }
   } else if (minutesToLeave < 0) {
     return const TripStatus(TripPhase.departed);
@@ -520,6 +689,7 @@ DateTime? nextSameLineDeparture(
       continue;
     }
     if (legCancellation(other, tripRealtime) != LegCancellation.none) continue;
+    if (hasPassedStop(tripRealtime, other, other.fromStopId)) continue;
     final DateTime dep =
         realtimeLegDeparture(other, tripRealtime) ?? other.departureTime;
     if (!dep.isAfter(own) || _isPast(dep, now)) continue;

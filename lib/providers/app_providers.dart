@@ -6,6 +6,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:gtfs_realtime_bindings/gtfs_realtime_bindings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_models.dart';
+import '../services/realtime_utils.dart';
 import '../services/transit_service.dart';
 
 // Service provider
@@ -556,7 +557,9 @@ class LiveBusNotifier extends StateNotifier<LiveBusState> {
       if (!mounted || !state.isActive) return;
       if (tripRealtime != null) {
         state = state.copyWith(
-          tripRealtime: tripRealtime,
+          // Ohitetulle pysäkille jää viimeisin aito ennuste eikä OTP:n
+          // taaksepäin kopioima myöhempi viive.
+          tripRealtime: mergeTripRealtime(state.tripRealtime, tripRealtime),
           tripUpdatesUpdatedAt: DateTime.now(),
         );
       }
